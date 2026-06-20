@@ -1,0 +1,17 @@
+# Secrets — NEVER commit (API 키 유출 방지)
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# OS / 에디터
+.DS_Store
+.idea/
+.vscode/
+
+# 배포에 불필요한 대용량 로컬 자료(필요 없으면 주석 해제)
+# papers/
