@@ -422,8 +422,8 @@ def open_chat_dialog():
     """챗봇을 대시보드와 분리된 팝업 모달 창으로 띄운다.
 
     모달 안의 위젯 조작은 fragment rerun이라 뒤쪽 대시보드는 즉시 갱신되지
-    않는다. 스크리닝 결과(st.session_state.df)는 사용자가 창을 닫을 때의
-    전체 rerun에서 대시보드에 반영된다.
+    않는다. st.dialog는 X로 닫아도 전체 앱 rerun이 보장되지 않으므로, 스크리닝
+    결과는 패널 상단의 '결과 보기·닫기' 버튼(st.rerun())으로 확실히 반영한다.
     """
     render_chat_panel()
 
@@ -438,14 +438,28 @@ def render_chat_panel():
 
     st.caption("메모리 소재(high-k·강유전체·NAND 산화물·RRAM) 발굴을 돕는 대화형 "
                "어시스턴트입니다. 자연어 요청은 스크리닝 조건으로 해석해 후보를 "
-               "탐색하고, 개념·정의·물리 해석에 관한 질문에는 근거와 함께 답변합니다. "
-               "스크리닝 결과는 창을 닫으면 대시보드에 반영됩니다.")
+               "탐색하고, 개념·정의·물리 해석에 관한 질문에는 근거와 함께 답변합니다.")
+
+    # '닫고 결과 보기' 버튼 — st.dialog는 X로 닫아도 전체 앱 rerun이 보장되지 않아
+    # 대시보드가 즉시 갱신되지 않는다. st.rerun()은 다이얼로그를 닫으며 앱을 다시
+    # 그려 결과를 곧바로 반영한다. 스크리닝(df 갱신)은 이번 run의 뒤쪽에서 일어나므로,
+    # 상단 슬롯을 만들어 두고 df가 확정된 뒤(_fill_close)에 채운다.
+    close_slot = st.empty()
+
+    def _fill_close():
+        cur = st.session_state.get("df")
+        if cur is not None and not cur.empty:
+            if close_slot.button(f"📊 결과 보기 · 창 닫기  ({len(cur)}개 후보)",
+                                 type="primary", use_container_width=True,
+                                 key="ai_close_view"):
+                st.rerun()
 
     api_key = _get_api_key()
     if not api_key:
         st.warning(
             "Anthropic API 키가 없습니다. "
             "`.streamlit/secrets.toml`에 `ANTHROPIC_API_KEY`를 설정하세요.")
+        _fill_close()
         return
 
     if "chat_history" not in st.session_state:
@@ -467,6 +481,7 @@ def render_chat_panel():
     existing = st.session_state.chat_history
     if not existing and not prompt:
         st.info(EXAMPLE_PROMPTS)
+        _fill_close()
         return
     if existing:
         older, latest = existing[:-2], existing[-2:]
@@ -481,6 +496,7 @@ def render_chat_panel():
                 st.markdown(msg["content"])
 
     if not prompt:
+        _fill_close()
         return
 
     # 새 질문: 사용자 메시지 → 진행 상태(단계) → 답변(토큰 스트리밍)을 차례로 노출.
@@ -526,6 +542,7 @@ def render_chat_panel():
     except Exception as e:
         status.update(label="오류 발생", state="error")
         st.error(f"AI 응답 오류: {e}")
+        _fill_close()
         return
 
     answer_box.markdown(answer)                          # 커서 제거, 최종 답변 확정
@@ -546,3 +563,5 @@ def render_chat_panel():
         st.session_state.df = df
         if criteria:
             st.session_state.app_label = criteria.get("응용분야", "AI 스크리닝")
+
+    _fill_close()   # df 확정 후 상단 슬롯에 '결과 보기·닫기' 버튼을 채운다
