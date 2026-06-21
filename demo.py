@@ -1,0 +1,487 @@
+"""메모리 반도체 소재 발굴 — 단일 파일 오프라인 데모.
+
+네트워크/API 불필요. 미리 스크리닝한 데이터가 파일에 내장돼 있고, AI 답변은
+사전 작성(canned)이라 어떤 환경에서도 즉시·안정적으로 동작한다.
+필요 패키지: streamlit, plotly, pandas, numpy
+실행: streamlit run demo.py
+"""
+import json, gzip, base64, itertools
+from collections import Counter
+
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import streamlit as st
+
+PALETTE = ["#1f4e79", "#2e75b6", "#9dc3e6", "#c55a11", "#548235",
+           "#7b5ea7", "#7f8c98", "#264653", "#9e480e", "#385723"]
+
+# ── 물리 상수/함수 (자체 포함) ──────────────────────────────────────────────
+EPS_SIO2, EG_SIO2, EG_SI = 3.9, 9.0, 1.12
+KAPPA_MAX_RELIABLE = 200.0
+PBE_GAP_SCISSOR = 1.5
+REFERENCE_DIELECTRICS = [
+    ("SiO2", 3.9, 9.0), ("Si3N4", 7.0, 5.3), ("Al2O3", 9.0, 8.8), ("Y2O3", 15.0, 6.0),
+    ("HfO2", 25.0, 5.8), ("ZrO2", 25.0, 5.8), ("Ta2O5", 25.0, 4.4), ("La2O3", 30.0, 6.0),
+    ("TiO2", 80.0, 3.2)]
+POLAR_POINT_GROUPS = {"1", "2", "m", "mm2", "4", "4mm", "3", "3m", "6", "6mm"}
+ALD_PRECURSORS = {
+    "Hf": ("TEMAHf / TDMAHf", 200, 300, 1.0), "Zr": ("TEMAZr / TDMAZr", 200, 300, 1.0),
+    "Al": ("TMA", 150, 300, 1.1), "Ti": ("TiCl4 / TDMAT", 150, 300, 0.5),
+    "Ta": ("PDMAT / Ta(OEt)5", 200, 300, 0.5), "La": ("La(iPrAMD)3", 200, 300, 0.4),
+    "Y": ("Y(iPrCp)3 / Y(thd)3", 250, 350, 0.4), "Si": ("BDEAS / 3DMAS", 200, 400, 0.8),
+    "Zn": ("DEZ", 120, 200, 1.8), "Sn": ("TDMASn", 150, 250, 0.5),
+    "Nb": ("Nb(OEt)5 / NbCl5", 200, 300, 0.4), "V": ("VO(OiPr)3 / VCl4", 150, 250, 0.4),
+    "Mo": ("MoF6", 200, 300, 0.4), "W": ("WF6 / W(CO)6", 200, 350, 0.4),
+    "Sr": ("Sr(iPr3Cp)2", 200, 300, 0.6), "Ba": ("Ba(iPr3Cp)2", 250, 350, 0.5),
+    "Ga": ("TMGa", 150, 300, 0.5), "In": ("InCp / TMIn", 150, 300, 0.5),
+    "Mg": ("Mg(EtCp)2", 200, 300, 1.0), "Ce": ("Ce(iPrCp)3", 200, 300, 0.4),
+    "Gd": ("Gd(thd)3", 200, 300, 0.4), "Ni": ("NiCp2", 200, 300, 0.4),
+    "Co": ("CoCp2", 200, 300, 0.4), "Fe": ("FeCp2", 200, 350, 0.3),
+    "Mn": ("Mn(EtCp)2", 150, 300, 0.4), "Cr": ("CrCp2", 200, 350, 0.3),
+    "Cu": ("Cu amidinate", 150, 250, 0.3), "Ru": ("Ru(EtCp)2", 200, 350, 0.5),
+    "Pt": ("MeCpPtMe3", 200, 300, 0.5), "Ir": ("Ir(acac)3", 200, 300, 0.4),
+    "Bi": ("BiPh3", 150, 300, 0.4)}
+_EPS0 = 8.854e-14
+
+
+def _pos(*v):
+    return all((x is not None and np.isfinite(x) and x > 0) for x in v)
+
+
+def corrected_band_gap(eg):
+    return float(eg) * PBE_GAP_SCISSOR if _pos(eg) else None
+
+
+def is_polar(pg):
+    return str(pg) in POLAR_POINT_GROUPS
+
+
+def ald_recipe(elements):
+    els = list(elements or [])
+    is_ox, is_nit = ("O" in els), ("N" in els)
+    cats = [e for e in els if e not in ("O", "N")]
+    if not cats or not (is_ox or is_nit):
+        return None
+    rows, gpcs, lows, highs, missing = [], [], [], [], []
+    for c in cats:
+        info = ALD_PRECURSORS.get(c)
+        if info:
+            p, lo, hi, g = info
+            rows.append({"cation": c, "precursor": p}); gpcs.append(g)
+            lows.append(lo); highs.append(hi)
+        else:
+            rows.append({"cation": c, "precursor": "전구체 미등록 (문헌 확인)"}); missing.append(c)
+    co = "NH3 또는 N2/H2 플라즈마" if (is_nit and not is_ox) else "H2O 또는 O3 (필요 시 O2 플라즈마)"
+    if lows:
+        lo, hi = max(lows), min(highs); ov = lo <= hi
+        if not ov:
+            lo, hi = min(lows), max(highs)
+    else:
+        lo = hi = None; ov = None
+    return {"precursors": rows, "co_reactant": co, "t_lo": lo, "t_hi": hi, "t_overlap": ov,
+            "gpc": (sum(gpcs) / len(gpcs)) if gpcs else None, "supercycle": len(cats) > 1,
+            "missing": missing, "film": "질화물" if (is_nit and not is_ox) else "산화물"}
+
+
+def ald_cycles(gpc_a, t_nm):
+    return int(round(t_nm * 10.0 / gpc_a)) if _pos(gpc_a, t_nm) else None
+
+
+def thickness_for_eot(eot, kap):
+    return float(eot) * float(kap) / EPS_SIO2 if _pos(kap, eot) else None
+
+
+def gate_cap_density(eot):
+    return _EPS0 * EPS_SIO2 / (eot * 1e-7) * 1e6 if _pos(eot) else None
+
+
+def band_offsets(eg):
+    if eg is None or not np.isfinite(eg):
+        return None
+    delta = max(0.0, float(eg) - EG_SI)
+    return 0.6 * delta, 0.4 * delta
+
+
+def gate_leakage(t_nm, barrier, m_eff=0.4, j0=1.0e6):
+    if not _pos(t_nm, barrier):
+        return None
+    m0, q, hbar = 9.109e-31, 1.602e-19, 1.055e-34
+    kap = np.sqrt(2.0 * m_eff * m0 * q * float(barrier)) / hbar
+    return float(j0 * np.exp(-2.0 * kap * (t_nm * 1e-9)))
+
+
+# ── 번들 데이터 ─────────────────────────────────────────────────────────────
+_DATA_B64 = "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"
+
+
+@st.cache_data(show_spinner=False)
+def load_data():
+    raw = json.loads(gzip.decompress(base64.b64decode(_DATA_B64)).decode())
+    return {k: pd.DataFrame(v) for k, v in raw.items()}
+
+
+DATASETS = load_data()
+
+# 사전 작성 AI 답변(canned) — 프리셋 매핑
+CANNED = {
+    "ALD로 합성 가능한 high-k 게이트 유전체 후보": ("고유전율 게이트 (high-k)",
+        "### ALD 합성 가능 high-k 게이트 유전체 후보\n\n"
+        "Materials Project DFT 데이터에서 **넓은 밴드갭(4~9 eV)·금속 제외·안정** 조건으로 "
+        "스크리닝하고, **ALD 전구체가 확립된 단순 산화물**만 추렸습니다.\n\n"
+        "- 품질지수 **κ·Eg**(×SiO₂)와 5 nm 기준 **EOT**로 SRAM/DRAM 적합성을 평가\n"
+        "- 각 후보는 Materials Project 원본 데이터에 링크(감사 가능)\n"
+        "- **ALD 합성 가능**한 것만 → 실제 양산성 고려\n\n"
+        "→ 결과를 대시보드에 반영했습니다. *고유전율·ALD 공정·소자 시뮬레이션* 탭에서 확인하세요."),
+    "HfO2 ZrO2 계열 강유전 메모리(FeRAM) 소재": ("강유전체 (FeRAM/FeFET)",
+        "### HfO₂·ZrO₂ 계열 강유전 메모리(FeRAM/FeFET) 후보\n\n"
+        "Hf 또는 Zr 함유 산화물을 추리고, 강유전성의 **결정학적 필요조건인 극성(polar) 점군** "
+        "여부로 후보를 한 단계 정교화했습니다(HfO₂ 강유전상은 orthorhombic Pca2₁).\n\n"
+        "- 화학식만이 아니라 **극성 공간군**으로 1차 선별\n"
+        "- 극성 점군은 필요조건(충분조건 아님) — 1차 우선 검토 대상\n\n"
+        "→ *강유전체* 탭에서 극성 후보를 확인하세요."),
+    "RRAM용 전이금속 산화물 (산소공공 스위칭)": ("저항변화 메모리 (RRAM)",
+        "### RRAM용 전이금속 산화물 후보\n\n"
+        "산소공공 필라멘트 스위칭에 적합한 **전이금속 산화물**을, 스위칭에 유리한 "
+        "**밴드갭 2~6 eV** 영역 중심으로 추렸습니다(HfO₂·TiO₂·Ta₂O₅ 계열).\n\n"
+        "→ *저항변화(RRAM)* 탭에서 확인하세요."),
+}
+
+st.set_page_config(page_title="메모리 반도체 소재 발굴 (데모)", page_icon="◈", layout="wide")
+st.markdown("""
+<style>
+  h1,h2,h3 { color:#14202b; font-weight:650; letter-spacing:-.2px; }
+  .block-container { padding-top:3.2rem; }
+  .app-header { border-bottom:2px solid #1f4e79; padding-bottom:.55rem; margin-bottom:1rem; }
+  .app-title { font-size:1.5rem; font-weight:700; color:#14202b; margin:0; }
+  .app-sub { color:#5b6b76; font-size:.84rem; margin-top:.3rem; }
+  div[data-testid="stMetricValue"] { font-family:ui-monospace,monospace; color:#1f4e79; font-weight:600; }
+  .badge { display:inline-block; background:#eaf0f6; color:#1f4e79; border:1px solid #cfe0ee;
+        padding:2px 10px; border-radius:3px; font-size:.74rem; font-weight:600; }
+  .demo { display:inline-block; background:#fde8c8; color:#9e480e; border:1px solid #f0c178;
+        padding:2px 10px; border-radius:3px; font-size:.72rem; font-weight:700; margin-left:8px; }
+</style>
+""", unsafe_allow_html=True)
+st.markdown('<div class="app-header"><div class="app-title">메모리 반도체 소재 발굴 플랫폼'
+            '<span class="demo">OFFLINE DEMO</span></div>'
+            '<div class="app-sub">Materials Project DFT 데이터 · high-k κ·Eg · 강유전체(극성) · '
+            'RRAM · ALD 공정 레시피 · 소자(TCAD) 시뮬레이션 — 네트워크/API 없이 동작하는 데모</div>'
+            '</div>', unsafe_allow_html=True)
+
+
+def fig_layout(fig, h=420):
+    fig.update_layout(template="plotly_white", height=h, margin=dict(l=10, r=10, t=50, b=10),
+                      font=dict(family="ui-monospace, monospace", size=12), colorway=PALETTE)
+    return fig
+
+
+def kappa_eg_figure(dframe, title, h=460):
+    full = dframe[dframe.kappa.notna() & dframe.band_gap.notna()].copy()
+    sub = full[full.kappa <= KAPPA_MAX_RELIABLE].copy()
+    fig = go.Figure()
+    kmax = min(KAPPA_MAX_RELIABLE, max(90.0, (float(sub.kappa.max()) if not sub.empty else 90) * 1.05))
+    ymax = max(10.5, (float(sub.band_gap.max()) if not sub.empty else 9) * 1.05)
+    for prod, color in [(EPS_SIO2 * EG_SIO2, "#cfd8e0"), (150.0, "#b8c4cf"), (300.0, "#a3b2bf")]:
+        kk = np.linspace(max(1.0, prod / ymax), kmax, 120)
+        fig.add_trace(go.Scatter(x=kk, y=prod / kk, mode="lines", name=f"κ·Eg={prod:.0f}",
+                      line=dict(dash="dot", width=1, color=color), hoverinfo="skip"))
+    fig.add_trace(go.Scatter(x=[r[1] for r in REFERENCE_DIELECTRICS],
+                  y=[r[2] for r in REFERENCE_DIELECTRICS], mode="markers+text",
+                  text=[r[0] for r in REFERENCE_DIELECTRICS], name="기준 유전체",
+                  textposition="top center", textfont=dict(size=10, color="#9e480e"),
+                  marker=dict(symbol="diamond", size=11, color="#c55a11")))
+    if not sub.empty:
+        fig.add_trace(go.Scatter(x=sub.kappa, y=sub.band_gap, mode="markers", name="후보 물질",
+                      marker=dict(size=8, color=sub.score, colorscale="Viridis", showscale=True,
+                                  colorbar=dict(title="발굴점수", thickness=12)),
+                      text=sub.formula,
+                      hovertemplate="%{text}<br>κ=%{x:.1f}<br>Eg=%{y:.2f} eV<extra></extra>"))
+    fig.update_layout(xaxis_title="정적 유전율 κ", yaxis_title="밴드갭 Eg (eV)", title=title,
+                      legend=dict(x=0.99, y=0.99, xanchor="right", yanchor="top",
+                                  bgcolor="rgba(255,255,255,0.72)"))
+    fig.update_xaxes(range=[0, kmax]); fig.update_yaxes(range=[0, ymax])
+    return fig_layout(fig, h)
+
+
+# ── AI 어시스턴트 (사전 작성 답변) ───────────────────────────────────────────
+@st.dialog("AI 어시스턴트 (데모)", width="large")
+def open_chat():
+    st.caption("메모리 소재를 자연어로 요청하면 조건을 해석해 스크리닝하고 근거와 함께 답합니다. "
+               "(데모: 사전 준비된 시나리오로 즉시·오프라인 응답)")
+    sel = st.session_state.get("_canned_sel")
+    if sel:
+        preset, answer = CANNED[sel]
+        with st.chat_message("user"):
+            st.markdown(sel)
+        with st.chat_message("assistant"):
+            st.markdown(answer)
+        n = len(DATASETS[preset])
+        if st.button(f"📊 결과 보기 · 창 닫기  ({n}개 후보)", type="primary",
+                     use_container_width=True):
+            st.session_state.preset = preset
+            st.session_state._canned_sel = None
+            st.rerun()
+        if st.button("다른 질문", use_container_width=True):
+            st.session_state._canned_sel = None
+            st.rerun()
+    else:
+        st.markdown("**예시 질문 (클릭하면 실행)**")
+        for q in CANNED:
+            if st.button(q, use_container_width=True, key="cq_" + q[:8]):
+                st.session_state._canned_sel = q
+                st.rerun()
+
+
+# ── 사이드바: 프리셋(=번들 데이터셋) ─────────────────────────────────────────
+st.sidebar.markdown("### 응용 프리셋")
+preset = st.sidebar.selectbox("목적을 선택하면 해당 후보군이 표시됩니다",
+                              list(DATASETS), key="preset")
+st.sidebar.caption("데모 모드: 미리 스크리닝한 결과(MP DFT 데이터)를 즉시 표시합니다. "
+                   "실제 버전은 사이드바 조건으로 라이브 스크리닝합니다.")
+st.sidebar.divider()
+st.sidebar.markdown("이 데모는 **네트워크·API 없이** 동작합니다. "
+                    "AI·스크리닝·ALD·소자 시뮬레이션 모두 내장 데이터로 즉시 반응합니다.")
+
+if st.button("AI 어시스턴트 열기", type="secondary",
+             help="자연어 질문으로 스크리닝(데모: 사전 시나리오)"):
+    open_chat()
+
+df = DATASETS[preset].copy()
+
+tabs = st.tabs(["개요", "고유전율 (High-k)", "강유전체 (FeRAM/FeFET)", "저항변화 (RRAM)",
+                "추천 후보", "ALD 공정", "소자 시뮬레이션", "데이터"])
+
+# 1) 개요
+with tabs[0]:
+    has_k = df[df.kappa.notna()]
+    st.markdown(f'<span class="badge">{preset}</span> <b>{len(df)}</b>개 후보',
+                unsafe_allow_html=True)
+    m = st.columns(5)
+    m[0].metric("후보 물질", f"{len(df)}")
+    m[1].metric("κ 데이터 보유", f"{len(has_k)}")
+    m[2].metric("고유전율 κ≥10", f"{int((df.kappa.fillna(0) >= 10).sum())}")
+    m[3].metric("ALD 가능", f"{int(df.is_ald.sum())}")
+    m[4].metric("최고 발굴점수", f"{df.score.max():.0f}")
+    st.divider()
+    c1, c2 = st.columns(2)
+    with c1:
+        st.plotly_chart(kappa_eg_figure(df, "κ–Eg 트레이드오프 지도 (메모리 유전체 핵심)"),
+                        use_container_width=True)
+    with c2:
+        fig = px.scatter(df, x="band_gap", y="e_above_hull", color="crystal_system",
+                         size="nsites", hover_data=["formula"],
+                         labels={"band_gap": "밴드갭 (eV)", "e_above_hull": "E above hull"},
+                         title="안정성 vs 밴드갭")
+        fig.update_traces(marker=dict(opacity=0.7))
+        st.plotly_chart(fig_layout(fig), use_container_width=True)
+
+# 2) 고유전율
+with tabs[1]:
+    st.markdown("**고유전율(high-k) 게이트·커패시터 유전체** — κ가 클수록 커패시턴스에 유리하나 "
+                "보통 Eg가 작아져 누설↑(κ–Eg 트레이드오프). κ·Eg와 EOT로 적합성 평가.")
+    hk = df[df.highk_fom.notna() & df.kappa_reliable].copy()
+    if hk.empty:
+        st.info("이 후보군에는 κ 데이터가 있는 high-k 후보가 적습니다. 다른 프리셋을 보세요.")
+    else:
+        c1, c2 = st.columns([3, 2])
+        with c1:
+            st.plotly_chart(kappa_eg_figure(df[df.highk_fom.notna()], "κ–Eg 지도 · 색=발굴점수"),
+                            use_container_width=True)
+        with c2:
+            st.markdown("**high-k 유망 Top 12**")
+            tp = hk.sort_values("score", ascending=False).head(12)
+            st.dataframe(tp[["formula", "kappa", "band_gap", "band_gap_corr", "highk_fom",
+                             "eot_5nm", "is_ald", "score"]], use_container_width=True,
+                         hide_index=True, column_config={
+                             "kappa": st.column_config.NumberColumn("κ", format="%.1f"),
+                             "band_gap": st.column_config.NumberColumn("Eg", format="%.2f"),
+                             "band_gap_corr": st.column_config.NumberColumn("Eg보정", format="%.2f"),
+                             "highk_fom": st.column_config.NumberColumn("κ·Eg", format="%.1f"),
+                             "eot_5nm": st.column_config.NumberColumn("EOT", format="%.2f"),
+                             "is_ald": st.column_config.CheckboxColumn("ALD"),
+                             "score": st.column_config.NumberColumn("점수", format="%.0f")})
+        st.caption("⚠️ Eg는 DFT(PBE)라 실제보다 낮습니다('Eg보정'=×1.5 추정). 실제 누설 여유는 더 나은 편.")
+
+# 3) 강유전체 (극성 공간군)
+with tabs[2]:
+    st.markdown("**강유전체 메모리 (FeRAM·FeFET)** — 강유전성의 결정학적 필요조건인 "
+                "**극성(polar) 점군** 여부로 Hf/Zr 산화물 후보를 정교화합니다.")
+    fe = df[df.has_hf_zr & df.is_oxide].copy()
+    if fe.empty:
+        st.info("이 후보군엔 Hf/Zr 산화물이 적습니다. '강유전체' 프리셋을 선택하세요.")
+    else:
+        n_polar = int(fe.is_polar.sum())
+        c = st.columns(3)
+        c[0].metric("Hf/Zr 산화물", f"{len(fe)}")
+        c[1].metric("극성 상(강유전 후보)", f"{n_polar}")
+        c[2].metric("극성 비율", f"{100 * n_polar / max(len(fe),1):.0f}%")
+        fep = fe.assign(극성=fe.is_polar.map({True: "극성", False: "비극성"}))
+        fig = px.scatter(fep, x="kappa", y="e_above_hull", color="극성", symbol="극성",
+                         size="nsites", hover_data=["formula", "spacegroup", "point_group"],
+                         color_discrete_map={"극성": "#c55a11", "비극성": "#7f8c98"},
+                         labels={"kappa": "유전율 κ", "e_above_hull": "hull"},
+                         title="유전율 vs 안정성 (색=극성 여부)")
+        st.plotly_chart(fig_layout(fig), use_container_width=True)
+        tp = fe.sort_values(["is_polar", "score"], ascending=[False, False]).head(12)
+        st.dataframe(tp[["formula", "spacegroup", "point_group", "is_polar", "band_gap",
+                         "kappa", "e_above_hull", "score"]], use_container_width=True,
+                     hide_index=True, column_config={
+                         "is_polar": st.column_config.CheckboxColumn("극성"),
+                         "band_gap": st.column_config.NumberColumn("Eg", format="%.2f"),
+                         "kappa": st.column_config.NumberColumn("κ", format="%.1f"),
+                         "e_above_hull": st.column_config.NumberColumn("hull", format="%.3f"),
+                         "score": st.column_config.NumberColumn("점수", format="%.0f")})
+        st.caption("극성 점군은 강유전의 필요조건(충분조건 아님). 극성 후보를 1차 우선 검토 대상으로.")
+
+# 4) RRAM
+with tabs[3]:
+    st.markdown("**저항변화 메모리(RRAM)** — 전이금속 산화물에서 산소공공 필라멘트 스위칭. "
+                "스위칭 적합 밴드갭(2~6 eV) 강조.")
+    rr = df[df.is_tm_oxide].copy()
+    if rr.empty:
+        st.info("이 후보군엔 전이금속 산화물이 적습니다. 'RRAM' 프리셋을 선택하세요.")
+    else:
+        fig = px.scatter(rr, x="band_gap", y="kappa", color="score", size="nsites",
+                         hover_data=["formula", "chemsys"], color_continuous_scale="Viridis",
+                         labels={"band_gap": "밴드갭 Eg", "kappa": "유전율 κ", "score": "발굴점수"},
+                         title="전이금속 산화물: 밴드갭 vs 유전율")
+        fig.add_vrect(x0=2.0, x1=6.0, fillcolor="#548235", opacity=0.12, line_width=0,
+                      annotation_text="스위칭 적합대 (2~6 eV)", annotation_position="top left")
+        st.plotly_chart(fig_layout(fig, 460), use_container_width=True)
+        tp = rr.sort_values("score", ascending=False).head(12)
+        st.dataframe(tp[["formula", "chemsys", "band_gap", "kappa", "e_above_hull", "score"]],
+                     use_container_width=True, hide_index=True)
+
+# 5) 추천 후보 (클릭 → MP)
+with tabs[4]:
+    st.markdown(f"**종합 발굴점수 Top 20** — `{preset}` 적합도로 산출한 휴리스틱 순위.")
+    best = df.sort_values("score", ascending=False).head(20).reset_index(drop=True)
+    fig = px.bar(best, x="score", y="formula", orientation="h", color="band_gap",
+                 color_continuous_scale="Viridis", custom_data=["material_id"],
+                 labels={"score": "발굴점수", "formula": "", "band_gap": "Eg"},
+                 title="추천 메모리 반도체 소재 후보 (막대 클릭 → MP 페이지)")
+    fig.update_traces(hovertemplate="%{y}<br>발굴점수=%{x:.0f}<br><b>클릭 → MP 링크</b><extra></extra>")
+    fig.update_layout(yaxis=dict(autorange="reversed"))
+    ev = st.plotly_chart(fig_layout(fig, 600), use_container_width=True,
+                         on_select="rerun", selection_mode="points", key="rec")
+    try:
+        pts = ev["selection"]["points"]
+    except (TypeError, KeyError):
+        pts = []
+    if pts and pts[0].get("customdata"):
+        mid = pts[0]["customdata"][0]
+        st.link_button(f"🔗 {pts[0].get('y')} — Materials Project에서 열기",
+                       f"https://materialsproject.org/materials/{mid}")
+    else:
+        st.caption("막대를 클릭하면 해당 물질의 Materials Project 링크 버튼이 나타납니다.")
+
+# 6) ALD 공정
+with tabs[5]:
+    st.markdown("**스크리닝 → 합성: ALD 공정 레시피** — 후보를 골라 전구체·공반응물·온도창·"
+                "**사이클 수**까지 1차 설계. 발굴에서 *어떻게 만들지*로.")
+    ald = df[df.is_ald].sort_values("score", ascending=False)
+    if ald.empty:
+        st.info("이 후보군엔 ALD 가능 후보가 적습니다.")
+    else:
+        opts = {f"{r.formula} · {r.material_id} (점수 {r.score:.0f})": r.material_id
+                for _, r in ald.head(40).iterrows()}
+        pk = st.selectbox("후보 선택 (ALD 가능)", list(opts), key="ald_pick")
+        row = ald[ald.material_id == opts[pk]].iloc[0]
+        rec = ald_recipe(list(row.elements))
+        if rec:
+            c1, c2 = st.columns([3, 2])
+            with c1:
+                st.markdown(f"#### {row.formula} — ALD {rec['film']} 공정")
+                pdf = pd.DataFrame(rec["precursors"]).rename(
+                    columns={"cation": "양이온", "precursor": "대표 전구체"})
+                st.dataframe(pdf, hide_index=True, use_container_width=True)
+                st.markdown(f"- **공반응물:** {rec['co_reactant']}")
+                if rec["t_lo"] is not None:
+                    st.markdown(f"- **권장 증착 온도:** {rec['t_lo']}–{rec['t_hi']} °C")
+                if rec["gpc"]:
+                    st.markdown(f"- **GPC(평균):** ~{rec['gpc']:.2f} Å/cycle")
+                if rec["supercycle"]:
+                    st.markdown("- **다성분 → 슈퍼사이클**(비율 보정) 필요.")
+                if rec["missing"]:
+                    st.markdown(f"- ⚠️ 전구체 미등록: {', '.join(rec['missing'])}")
+            with c2:
+                st.markdown("**🎯 두께 → 사이클 계산**")
+                kap = float(row.kappa) if pd.notna(row.kappa) and row.kappa > 0 else None
+                if kap:
+                    eot = st.slider("목표 EOT (nm)", 0.5, 3.0, 1.0, 0.1, key="ald_eot")
+                    tp = thickness_for_eot(eot, kap)
+                    cc = st.columns(2)
+                    cc[0].metric("필요 물리두께", f"{tp:.1f} nm" if tp else "—")
+                    cc[1].metric("ALD 사이클 수", f"{ald_cycles(rec['gpc'], tp)}" if tp else "—")
+                    st.caption(f"κ={kap:.1f} 기준.")
+                else:
+                    tt = st.slider("목표 물리두께 (nm)", 1.0, 20.0, 5.0, 0.5, key="ald_t")
+                    st.metric("ALD 사이클 수", f"{ald_cycles(rec['gpc'], tt)}")
+        st.caption("※ MP 조성 + ALD 문헌 일반값 결합한 1차 설계 가이드(실 공정은 최적화 필요).")
+
+# 7) 소자 시뮬레이션 (TCAD 방향)
+with tabs[6]:
+    st.markdown("**소자 시뮬레이션 (TCAD 연동 방향)** — κ·Eg·EOT에서 게이트 스택의 "
+                "**커패시턴스·누설·밴드정렬**을 1차 예측. 풀 TCAD 연동의 *방향* 예시.")
+    hk = df[df.highk_fom.notna() & df.kappa_reliable].sort_values("highk_fom", ascending=False)
+    if hk.empty:
+        st.info("κ 데이터가 있는 게이트 유전체 후보가 적습니다.")
+    else:
+        opts = {f"{r.formula} · κ={r.kappa:.1f} · Eg={r.band_gap:.2f}eV": r.material_id
+                for _, r in hk.head(40).iterrows()}
+        pk = st.selectbox("게이트 유전체 후보 선택", list(opts), key="dev_pick")
+        row = hk[hk.material_id == opts[pk]].iloc[0]
+        kap, eg = float(row.kappa), float(row.band_gap)
+        dEc, dEv = band_offsets(eg) or (0.0, 0.0)
+        dEc_si = (band_offsets(EG_SIO2) or (0.0, 0.0))[0]
+        floor = lambda j: max(j, 1e-9) if j else 1e-9
+        eot = st.slider("목표 EOT (nm)", 0.5, 3.0, 1.0, 0.1, key="dev_eot")
+        tphys = thickness_for_eot(eot, kap)
+        m = st.columns(4)
+        m[0].metric("게이트 C_ox", f"{gate_cap_density(eot):.2f} µF/cm²")
+        m[1].metric("물리두께", f"{tphys:.1f} nm")
+        m[2].metric("ΔEc (배리어)", f"~{dEc:.1f} eV")
+        m[3].metric("추정 누설", f"{floor(gate_leakage(tphys, dEc)):.0e} A/cm²")
+        c1, c2 = st.columns(2)
+        with c1:
+            eots = np.linspace(0.5, 3.0, 30)
+            jm = [floor(gate_leakage(thickness_for_eot(e, kap), dEc)) for e in eots]
+            js = [floor(gate_leakage(e, dEc_si)) for e in eots]
+            f = go.Figure()
+            f.add_trace(go.Scatter(x=eots, y=js, name="SiO₂", line=dict(color="#c55a11", width=2)))
+            f.add_trace(go.Scatter(x=eots, y=jm, name=f"{row.formula} (고-κ)",
+                                   line=dict(color="#1f4e79", width=2)))
+            f.update_yaxes(type="log", title="게이트 누설 J (A/cm², 예시)", exponentformat="power")
+            f.update_xaxes(title="EOT (nm)")
+            f.update_layout(title="EOT–누설: EOT↓ 시 SiO₂는 폭증, 고-κ는 억제",
+                            legend=dict(x=0.99, y=0.99, xanchor="right", yanchor="top",
+                                        bgcolor="rgba(255,255,255,0.6)"))
+            st.plotly_chart(fig_layout(f, 380), use_container_width=True)
+        with c2:
+            ec_si, ev_si = 0.0, -EG_SI
+            ec_d, ev_d = dEc, dEc - eg
+            b = go.Figure()
+            b.add_vrect(x0=1, x1=2.3, fillcolor="#9dc3e6", opacity=0.15, line_width=0)
+            b.add_trace(go.Scatter(x=[0, 1], y=[0, 0], mode="lines",
+                                   line=dict(color="#7f8c98", width=4)))
+            b.add_trace(go.Scatter(x=[1, 1, 2.3, 2.3, 3.5], y=[0, ec_d, ec_d, ec_si, ec_si],
+                                   mode="lines", line=dict(color="#1f4e79", width=3)))
+            b.add_trace(go.Scatter(x=[1, 2.3, 2.3, 3.5], y=[ev_d, ev_d, ev_si, ev_si],
+                                   mode="lines", line=dict(color="#548235", width=3)))
+            b.add_annotation(x=1.65, y=ec_d + 0.5, text=f"{row.formula}", showarrow=False,
+                             font=dict(size=11, color="#1f4e79"))
+            b.update_yaxes(title="에너지 (eV)")
+            b.update_xaxes(tickvals=[0.5, 1.65, 2.9], ticktext=["금속", "유전체", "Si"])
+            b.update_layout(title="게이트 스택 밴드 정렬 (모식도)", showlegend=False)
+            st.plotly_chart(fig_layout(b, 380), use_container_width=True)
+        st.caption("※ 해석적 1차 모델(예시): C_ox 정확, 누설은 직접터널링 경향(절대값 미보정), "
+                   "밴드오프셋은 PBE Eg 기반 추정. 풀 TCAD로 C–V/이동도/신뢰성/I–V 정밀화 가능.")
+
+# 8) 데이터
+with tabs[7]:
+    q = st.text_input("화학식 검색", placeholder="예: HfO2, ZrO2")
+    show = df[df.formula.str.contains(q, case=False, na=False)] if q else df
+    st.dataframe(show.sort_values("score", ascending=False), use_container_width=True, height=460)
+    st.download_button("CSV 다운로드", df.to_csv(index=False).encode("utf-8-sig"),
+                       "demo_candidates.csv", "text/csv")
