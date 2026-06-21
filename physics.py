@@ -20,6 +20,11 @@ EPS_SIO2 = 3.9            # SiO2 정적 유전율
 EG_SIO2 = 9.0            # SiO2 밴드갭 (eV)
 EG_SI = 1.12            # Si 밴드갭 (eV) — 밴드오프셋 적정성 판단 기준
 
+# DFT(PBE-GGA) 밴드갭은 실제보다 체계적으로 작게 나온다(보통 30~50% 과소평가).
+# κ·Eg FOM·EOT·누설 판단이 낙관적으로 치우치는 것을 막기 위한 경험적 scissor
+# 계수(산화물 평균치 ~1.5). 정밀값은 물질별로 다르며 HSE/실험값이 정답이다.
+PBE_GAP_SCISSOR = 1.5
+
 # DFPT 정적 유전율 신뢰 상한.
 # Materials Project의 정적 유전율은 격자 불안정(소프트 포논) 근처에서 발산해
 # κ가 수백~수천에 이르는 비물리적 값이 나올 수 있다(예: 강유전 불안정 직전).
@@ -60,6 +65,27 @@ ALD_CATIONS = {
     "B", "Sb", "Bi",
 }
 
+# 극성(polar) 점군 — 강유전성의 결정학적 필요조건. 자발 분극이 가능한 10개 점군.
+# 강유전체는 반드시 이 중 하나이지만 충분조건은 아니다(스위칭 가능한 준안정 극성
+# 상이어야 함; 예: HfO2 강유전상은 orthorhombic Pca2₁ = 공간군 #29, 점군 mm2).
+POLAR_POINT_GROUPS = {"1", "2", "m", "mm2", "4", "4mm", "3", "3m", "6", "6mm"}
+
+# 원자번호 순 원소 기호 — 포함/제외 원소 선택 UI(검색 가능 multiselect)용.
+ELEMENT_SYMBOLS = [
+    "H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne",
+    "Na", "Mg", "Al", "Si", "P", "S", "Cl", "Ar", "K", "Ca",
+    "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn",
+    "Ga", "Ge", "As", "Se", "Br", "Kr", "Rb", "Sr", "Y", "Zr",
+    "Nb", "Mo", "Tc", "Ru", "Rh", "Pd", "Ag", "Cd", "In", "Sn",
+    "Sb", "Te", "I", "Xe", "Cs", "Ba", "La", "Ce", "Pr", "Nd",
+    "Pm", "Sm", "Eu", "Gd", "Tb", "Dy", "Ho", "Er", "Tm", "Yb",
+    "Lu", "Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au", "Hg",
+    "Tl", "Pb", "Bi", "Po", "At", "Rn", "Fr", "Ra", "Ac", "Th",
+    "Pa", "U", "Np", "Pu", "Am", "Cm", "Bk", "Cf", "Es", "Fm",
+    "Md", "No", "Lr", "Rf", "Db", "Sg", "Bh", "Hs", "Mt", "Ds",
+    "Rg", "Cn", "Nh", "Fl", "Mc", "Lv", "Ts", "Og",
+]
+
 
 def _pos(*vals):
     """모든 값이 유한하고 양수인지 검사."""
@@ -67,6 +93,21 @@ def _pos(*vals):
         if v is None or not np.isfinite(v) or v <= 0:
             return False
     return True
+
+
+def corrected_band_gap(eg_ev, scissor=PBE_GAP_SCISSOR):
+    """PBE 과소평가를 보정한 추정 밴드갭(eV) = eg×scissor(경험적).
+
+    물질별로 정확도가 다르므로 1차 추정치로만 쓰고 원시 PBE 값과 함께 제시한다.
+    """
+    if eg_ev is None or not np.isfinite(eg_ev) or eg_ev <= 0:
+        return None
+    return float(eg_ev) * float(scissor)
+
+
+def is_polar(point_group):
+    """점군이 극성(polar)인지 — 강유전 후보의 1차 결정학적 선별 기준."""
+    return str(point_group) in POLAR_POINT_GROUPS
 
 
 # ──────────────────────────────────────────────────────────────────────────

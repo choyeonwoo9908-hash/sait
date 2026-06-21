@@ -73,7 +73,8 @@ def fetch(params: dict):
 
     rows = []
     for d in docs:
-        cs = d.symmetry.crystal_system if d.symmetry else None
+        sym = d.symmetry
+        cs = sym.crystal_system if sym else None
         rows.append(dict(
             material_id=str(d.material_id),
             formula=d.formula_pretty,
@@ -90,6 +91,9 @@ def fetch(params: dict):
             volume=d.volume,
             density=d.density,
             crystal_system=cs.value if cs else "N/A",
+            point_group=str(sym.point_group) if sym and sym.point_group else "N/A",
+            spacegroup=str(sym.symbol) if sym and sym.symbol else "N/A",
+            spacegroup_no=int(sym.number) if sym and sym.number else None,
             theoretical=bool(d.theoretical),
             bulk=_vrh(d.bulk_modulus),
             shear=_vrh(d.shear_modulus),
@@ -125,6 +129,8 @@ def build_df(rows, app_key):
         lambda r: r.is_oxide and any(e in phys.TRANSITION_METALS for e in r.elements),
         axis=1)
     df["is_ald"] = df["elements"].apply(phys.ald_synthesizable)   # ALD 합성 유망(휴리스틱)
+    df["band_gap_corr"] = df["band_gap"].apply(phys.corrected_band_gap)  # PBE 과소평가 보정 추정 Eg
+    df["is_polar"] = df["point_group"].apply(phys.is_polar)       # 극성 점군(강유전 1차 선별)
 
     # ── 박막 열·기계 안정성 보조 지표 ───────────────────────────────────
     df["Pugh"] = df.apply(lambda r: phys.pugh_ratio(r.bulk, r.shear), axis=1)

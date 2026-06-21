@@ -123,8 +123,14 @@ stable_only = st.sidebar.checkbox("열역학적 안정 물질만 (hull≈0)", va
 exp_only = st.sidebar.checkbox("실험적으로 알려진 물질만 (이론물질 제외)", value=False)
 
 st.sidebar.markdown("**조성**")
-include_elements = st.sidebar.text_input("포함 원소 (쉼표)", placeholder="예: Ga, N")
-exclude_elements = st.sidebar.text_input("제외 원소 (쉼표)", placeholder="예: Pb, Hg, Cd")
+include_elements = st.sidebar.multiselect(
+    "포함 원소 (모두 포함·AND)", phys.ELEMENT_SYMBOLS, default=[],
+    placeholder="원소 검색·선택 (예: Hf, O)",
+    help="선택한 원소를 모두 포함하는 물질만. 입력칸에 원소기호를 타이핑하면 검색됩니다.")
+exclude_elements = st.sidebar.multiselect(
+    "제외 원소", phys.ELEMENT_SYMBOLS, default=[],
+    placeholder="원소 검색·선택 (예: Pb, Hg, Cd)",
+    help="선택한 원소를 하나라도 포함하면 제외합니다.")
 nelements = st.sidebar.multiselect("원소 개수", [1, 2, 3, 4, 5],
                                    default=[], help="비우면 전체. 2=이원계, 3=삼원계 …")
 nsites_max = st.sidebar.slider("최대 원자 수 (단위셀)", 1, 60, 30)
@@ -229,8 +235,8 @@ if run:
             df_new = datamod.run_screening(
                 bg_min=bg_min, bg_max=bg_max, hull=hull, nsites_max=nsites_max,
                 max_results=int(max_results),
-                include=[e.strip() for e in include_elements.split(",") if e.strip()] or None,
-                exclude=[e.strip() for e in exclude_elements.split(",") if e.strip()] or None,
+                include=include_elements or None,
+                exclude=exclude_elements or None,
                 nelements=nelements,
                 app_key=st.session_state.get("app_key", "general"),
                 include_any=st.session_state.get("app_include_any"),
@@ -253,18 +259,125 @@ if st.button("AI 어시스턴트 열기", type="secondary",
                   "근거와 함께 답변합니다."):
     chatbot.open_chat_dialog()
 
+# ── 비교 바구니 (여러 스크리닝에서 관심 물질 수집) ───────────────────────────
+BASKET_COLS = ["material_id", "formula", "band_gap", "band_gap_corr", "kappa",
+               "highk_fom", "eot_5nm", "e_above_hull", "crystal_system",
+               "spacegroup", "point_group", "is_polar", "is_ald", "score"]
+
+
+def _basket():
+    return st.session_state.setdefault("basket", {})
+
+
+def add_to_basket(rows_df, source_label=""):
+    b = _basket()
+    for _, r in rows_df.iterrows():
+        item = {c: r[c] for c in BASKET_COLS if c in rows_df.columns}
+        item["source"] = source_label
+        b[str(r.material_id)] = item
+
+
+def _basket_report_md(items):
+    out = ["# 메모리 소재 비교 리포트", "", f"총 {len(items)}개 후보", ""]
+    for it in items:
+        mid = it.get("material_id", "")
+        out.append(f"## {it.get('formula', '?')}  ({mid})")
+        out.append(f"- Materials Project: https://materialsproject.org/materials/{mid}")
+        eg, egc = it.get("band_gap"), it.get("band_gap_corr")
+        if egc is not None and pd.notna(egc):
+            out.append(f"- 밴드갭 Eg: {eg:.2f} eV (PBE) · ~{egc:.2f} eV (보정 추정)")
+        elif eg is not None and pd.notna(eg):
+            out.append(f"- 밴드갭 Eg: {eg:.2f} eV (PBE)")
+        for label, key, fmt in [("유전율 κ", "kappa", "{:.1f}"),
+                                ("κ·Eg(×SiO₂)", "highk_fom", "{:.1f}"),
+                                ("EOT@5nm(nm)", "eot_5nm", "{:.2f}"),
+                                ("E above hull", "e_above_hull", "{:.3f}"),
+                                ("발굴점수", "score", "{:.0f}")]:
+            v = it.get(key)
+            if v is not None and pd.notna(v):
+                out.append(f"- {label}: {fmt.format(v)}")
+        out.append(f"- 공간군: {it.get('spacegroup', '?')} ({it.get('point_group', '?')})"
+                   f"{' · 극성(강유전 후보)' if it.get('is_polar') else ''}")
+        if it.get("is_ald"):
+            out.append("- ALD 합성 유망")
+        if it.get("source"):
+            out.append(f"- 출처 스크리닝: {it['source']}")
+        out.append("")
+    return "\n".join(out)
+
+
+def render_basket():
+    st.markdown("**비교 바구니** — 여러 스크리닝에서 담아둔 관심 물질을 한곳에서 "
+                "비교하고 CSV·JSON·리포트로 내보냅니다.")
+    b = _basket()
+    if not b:
+        st.info("**데이터** 탭에서 물질을 골라 *바구니에 담기* 하면 여기에 모입니다.")
+        return
+    items = list(b.values())
+    bdf = pd.DataFrame(items)
+    bdf["MP"] = bdf["material_id"].apply(
+        lambda m: f"https://materialsproject.org/materials/{m}")
+    st.caption(f"{len(items)}개 담김 (스크리닝을 바꿔도 유지됩니다)")
+    cols = [c for c in BASKET_COLS if c in bdf.columns] + ["MP"]
+    st.dataframe(bdf[cols], use_container_width=True, hide_index=True,
+                 column_config={
+                     "formula": st.column_config.TextColumn("물질"),
+                     "band_gap": st.column_config.NumberColumn("Eg(eV)", format="%.2f"),
+                     "band_gap_corr": st.column_config.NumberColumn("Eg보정", format="%.2f"),
+                     "kappa": st.column_config.NumberColumn("κ", format="%.1f"),
+                     "highk_fom": st.column_config.NumberColumn("κ·Eg", format="%.1f"),
+                     "eot_5nm": st.column_config.NumberColumn("EOT(nm)", format="%.2f"),
+                     "e_above_hull": st.column_config.NumberColumn("hull", format="%.3f"),
+                     "is_polar": st.column_config.CheckboxColumn("극성"),
+                     "is_ald": st.column_config.CheckboxColumn("ALD"),
+                     "score": st.column_config.NumberColumn("점수", format="%.0f"),
+                     "MP": st.column_config.LinkColumn("MP", display_text="열기")})
+
+    if "score" in bdf.columns and bdf["score"].notna().any():
+        fig = px.bar(bdf.sort_values("score", ascending=False),
+                     x="score", y="formula", orientation="h", color="band_gap",
+                     color_continuous_scale="Viridis",
+                     labels={"score": "발굴점수", "formula": "", "band_gap": "Eg"},
+                     title="바구니 후보 비교 (발굴점수)")
+        fig.update_layout(yaxis=dict(autorange="reversed"))
+        st.plotly_chart(fig_layout(fig, 420), use_container_width=True)
+
+    m1, m2 = st.columns(2)
+    labels = {f"{it.get('formula', '?')} ({it.get('material_id', '')})":
+              str(it.get("material_id", "")) for it in items}
+    rm = m1.multiselect("바구니에서 빼기", list(labels))
+    if m1.button("선택 제거") and rm:
+        for lb in rm:
+            b.pop(labels[lb], None)
+        st.rerun()
+    if m2.button("전체 비우기"):
+        st.session_state["basket"] = {}
+        st.rerun()
+
+    exp = bdf[[c for c in BASKET_COLS if c in bdf.columns]]
+    d1, d2, d3 = st.columns(3)
+    d1.download_button("CSV", exp.to_csv(index=False).encode("utf-8-sig"),
+                       "basket.csv", "text/csv", use_container_width=True)
+    d2.download_button("JSON", exp.to_json(orient="records", force_ascii=False).encode("utf-8"),
+                       "basket.json", "application/json", use_container_width=True)
+    d3.download_button("리포트(MD)", _basket_report_md(items).encode("utf-8"),
+                       "basket_report.md", "text/markdown", use_container_width=True)
+
+
 tabs = st.tabs(["개요", "고유전율 (High-k)", "강유전체 (FeRAM/FeFET)",
                 "NAND 산화물", "저항변화 (RRAM)",
-                "화학공간 탐색", "추천 후보", "데이터"])
+                "화학공간 탐색", "추천 후보", "데이터", "비교 바구니"])
 
 df = st.session_state.get("df")
 
 if df is None or df.empty:
-    for t in tabs:
+    for t in tabs[:-1]:
         with t:
             st.info("사이드바에서 **스크리닝 실행**을 누르거나, 위의 "
                     "**AI 어시스턴트 열기** 버튼으로 자연어로 질문해 "
                     "메모리 소재 후보를 찾아보세요.")
+    with tabs[-1]:
+        render_basket()          # 바구니는 데이터가 없어도 접근 가능
     st.stop()
 
 # 1) 개요
@@ -322,13 +435,14 @@ with tabs[1]:
         with c2:
             st.markdown("**high-k 유망 Top 12** (발굴점수 순)")
             tp = hk.sort_values("score", ascending=False).head(12)
-            st.dataframe(tp[["formula", "kappa", "band_gap", "highk_fom", "eot_5nm",
-                             "is_ald", "score"]],
+            st.dataframe(tp[["formula", "kappa", "band_gap", "band_gap_corr",
+                             "highk_fom", "eot_5nm", "is_ald", "score"]],
                          use_container_width=True, hide_index=True,
                          column_config={
                              "formula": st.column_config.TextColumn("물질"),
                              "kappa": st.column_config.NumberColumn("κ", format="%.1f"),
                              "band_gap": st.column_config.NumberColumn("Eg(eV)", format="%.2f"),
+                             "band_gap_corr": st.column_config.NumberColumn("Eg보정(eV)", format="%.2f"),
                              "highk_fom": st.column_config.NumberColumn("κ·Eg(×SiO₂)", format="%.1f"),
                              "eot_5nm": st.column_config.NumberColumn("EOT@5nm(nm)", format="%.2f"),
                              "is_ald": st.column_config.CheckboxColumn("ALD"),
@@ -338,47 +452,66 @@ with tabs[1]:
                "EOT가 작을수록 같은 물리두께로 더 큰 커패시턴스(미세화 유리).")
         if n_drop:
             cap += f" ※ κ>{int(phys.KAPPA_MAX_RELIABLE)}인 {n_drop}건은 DFPT 발산 아티팩트로 보아 제외했습니다."
+        cap += (" ⚠️ Eg는 DFT(PBE) 계산값이라 실제보다 ~30~50% 낮습니다('Eg보정'은 "
+                f"×{phys.PBE_GAP_SCISSOR} 추정). 실제 밴드오프셋·누설 여유는 표시보다 나은 편입니다.")
         st.caption(cap)
 
 # 3) 강유전체 (FeRAM/FeFET)
 with tabs[2]:
     st.markdown("**강유전체 메모리 후보 (FeRAM·FeFET)** — HfO₂/ZrO₂ 계열 산화물은 "
-                "비휘발성 강유전 상(orthorhombic Pca2₁)을 형성해 차세대 메모리 모재로 주목받습니다. "
-                "여기서는 Hf/Zr 함유 산화물을 추려 결정계·유전율·안정성으로 평가합니다.")
-    fe = df[df.has_hf_zr & df.is_oxide].copy()
-    if fe.empty:
+                "비휘발성 강유전 상(orthorhombic Pca2₁, 공간군 #29)을 형성해 차세대 메모리 "
+                "모재로 주목받습니다. 강유전성의 **결정학적 필요조건은 극성(polar) 점군**이라, "
+                "Hf/Zr 산화물에 더해 **극성 공간군 여부**로 후보를 한 단계 정교화합니다.")
+    fe_all = df[df.has_hf_zr & df.is_oxide].copy()
+    if fe_all.empty:
         st.info("Hf/Zr 함유 산화물 후보가 없습니다. 사이드바 '포함 원소'에 Hf 또는 Zr를 넣거나 "
                 "**강유전체 (FeRAM/FeFET)** 프리셋으로 다시 스크리닝해 보세요.")
     else:
+        n_polar = int(fe_all.is_polar.sum())
+        m = st.columns(3)
+        m[0].metric("Hf/Zr 산화물", f"{len(fe_all)}")
+        m[1].metric("극성 상(강유전 후보)", f"{n_polar}")
+        m[2].metric("극성 비율", f"{100 * n_polar / len(fe_all):.0f}%")
+        polar_only = st.checkbox("극성(polar) 상만 보기", value=False,
+                                 help="자발 분극이 가능한 10개 극성 점군에 속하는 상만 표시")
+        fe = fe_all[fe_all.is_polar].copy() if polar_only else fe_all
         c1, c2 = st.columns(2)
         with c1:
-            vc = fe.crystal_system.value_counts().reset_index()
-            vc.columns = ["결정계", "수"]
-            fig = px.bar(vc, x="결정계", y="수",
-                         title="Hf/Zr 산화물 결정계 (orthorhombic=강유전 상 관련)")
+            vc = (fe_all.is_polar.map({True: "극성(polar)", False: "비극성"})
+                  .value_counts().reset_index())
+            vc.columns = ["분류", "수"]
+            fig = px.bar(vc, x="분류", y="수", color="분류",
+                         color_discrete_map={"극성(polar)": "#c55a11", "비극성": "#7f8c98"},
+                         title="극성 vs 비극성 (강유전 필요조건)")
             st.plotly_chart(fig_layout(fig), use_container_width=True)
         with c2:
-            fig = px.scatter(fe, x="kappa", y="e_above_hull", color="score",
-                             size="nsites", hover_data=["formula", "crystal_system"],
-                             color_continuous_scale="Viridis",
-                             labels={"kappa": "유전율 κ", "e_above_hull": "hull",
-                                     "score": "발굴점수"},
-                             title="유전율 vs 안정성 (Hf/Zr 산화물)")
+            fe_plot = fe.assign(극성=fe.is_polar.map({True: "극성", False: "비극성"}))
+            fig = px.scatter(fe_plot, x="kappa", y="e_above_hull", color="극성",
+                             symbol="극성", size="nsites",
+                             hover_data=["formula", "spacegroup", "point_group"],
+                             color_discrete_map={"극성": "#c55a11", "비극성": "#7f8c98"},
+                             labels={"kappa": "유전율 κ", "e_above_hull": "hull"},
+                             title="유전율 vs 안정성 (색=극성 여부)")
             st.plotly_chart(fig_layout(fig), use_container_width=True)
-        st.markdown("**강유전 메모리 유망 Top 12** (발굴점수 순)")
-        tp = fe.sort_values("score", ascending=False).head(12)
-        st.dataframe(tp[["formula", "crystal_system", "band_gap", "kappa",
-                         "e_above_hull", "score"]],
+        st.markdown("**강유전 메모리 유망 Top 12** (극성 우선 → 발굴점수 순)")
+        tp = fe.sort_values(["is_polar", "score"], ascending=[False, False]).head(12)
+        st.dataframe(tp[["formula", "spacegroup", "point_group", "is_polar",
+                         "crystal_system", "band_gap", "kappa", "e_above_hull", "score"]],
                      use_container_width=True, hide_index=True,
                      column_config={
                          "formula": st.column_config.TextColumn("물질"),
+                         "spacegroup": st.column_config.TextColumn("공간군"),
+                         "point_group": st.column_config.TextColumn("점군"),
+                         "is_polar": st.column_config.CheckboxColumn("극성"),
                          "crystal_system": st.column_config.TextColumn("결정계"),
                          "band_gap": st.column_config.NumberColumn("Eg(eV)", format="%.2f"),
                          "kappa": st.column_config.NumberColumn("κ", format="%.1f"),
                          "e_above_hull": st.column_config.NumberColumn("hull", format="%.3f"),
                          "score": st.column_config.NumberColumn("점수", format="%.0f")})
-        st.caption("참고: 강유전성은 특정 준안정 orthorhombic 상에서 발현되므로, MP의 평형 "
-                   "상(결정계)만으로 직접 판정되지 않습니다. 본 탭은 화학계 기반 1차 후보군입니다.")
+        st.caption("극성 점군은 강유전의 **필요조건**(자발 분극 가능)이지 충분조건은 아닙니다 — "
+                   "실제 스위칭은 준안정 극성 상·결함에 의존합니다. MP는 평형 상을 주므로 "
+                   "HfO₂의 강유전 Pca2₁처럼 준안정 극성 상은 평형이 비극성으로 나올 수 있습니다. "
+                   "극성으로 표시된 후보를 1차 우선 검토 대상으로 보세요.")
 
 # 4) NAND 산화물 (터널/블로킹)
 with tabs[3]:
@@ -401,15 +534,20 @@ with tabs[3]:
         st.plotly_chart(fig_layout(fig, 460), use_container_width=True)
         st.markdown("**넓은 밴드갭 산화물 Top 12** (Eg 순)")
         tp = nd.sort_values("band_gap", ascending=False).head(12)
-        st.dataframe(tp[["formula", "band_gap", "kappa", "eot_5nm", "e_above_hull", "score"]],
+        st.dataframe(tp[["formula", "band_gap", "band_gap_corr", "kappa", "eot_5nm",
+                         "e_above_hull", "score"]],
                      use_container_width=True, hide_index=True,
                      column_config={
                          "formula": st.column_config.TextColumn("물질"),
                          "band_gap": st.column_config.NumberColumn("Eg(eV)", format="%.2f"),
+                         "band_gap_corr": st.column_config.NumberColumn("Eg보정(eV)", format="%.2f"),
                          "kappa": st.column_config.NumberColumn("κ", format="%.1f"),
                          "eot_5nm": st.column_config.NumberColumn("EOT@5nm(nm)", format="%.2f"),
                          "e_above_hull": st.column_config.NumberColumn("hull", format="%.3f"),
                          "score": st.column_config.NumberColumn("점수", format="%.0f")})
+        st.caption(f"⚠️ Eg는 DFT(PBE) 값이라 실제보다 낮습니다('Eg보정'은 ×{phys.PBE_GAP_SCISSOR} "
+                   "추정). 배리어(에너지 장벽)는 실제 Eg를 따르므로 넓은 갭 후보일수록 "
+                   "표시보다 유리합니다.")
 
 # 5) 저항변화 (RRAM)
 with tabs[4]:
@@ -522,11 +660,27 @@ with tabs[6]:
 # 8) 데이터
 with tabs[7]:
     q = st.text_input("화학식/원소 검색", placeholder="예: HfO2, Hf, ZrO2")
-    show = df[df.formula.str.contains(q, case=False, na=False)] if q else df
-    st.dataframe(show.sort_values("score", ascending=False),
-                 use_container_width=True, height=460)
+    show = (df[df.formula.str.contains(q, case=False, na=False)] if q else df) \
+        .sort_values("score", ascending=False)
+    st.dataframe(show, use_container_width=True, height=460)
+
+    st.markdown("**비교 바구니에 담기** — 관심 물질을 골라 담으면 '비교 바구니' 탭에서 "
+                "비교·내보내기 할 수 있습니다.")
+    opts = {f"{r.formula} ({r.material_id})": str(r.material_id)
+            for _, r in show.head(200).iterrows()}
+    picked = st.multiselect("물질 선택 (점수 상위 200개 중)", list(opts), key="basket_pick")
+    if st.button("바구니에 담기", key="basket_add", disabled=not picked):
+        sel = {opts[p] for p in picked}
+        add_to_basket(show[show.material_id.astype(str).isin(sel)],
+                      st.session_state.get("app_label", ""))
+        st.success(f"{len(sel)}개 담음 → '비교 바구니' 탭에서 확인하세요.")
+
     c1, c2 = st.columns(2)
     c1.download_button("CSV 다운로드", df.to_csv(index=False).encode("utf-8-sig"),
                        "memory_material_candidates.csv", "text/csv", use_container_width=True)
     c2.download_button("JSON 다운로드", df.to_json(orient="records", force_ascii=False).encode("utf-8"),
                        "memory_material_candidates.json", "application/json", use_container_width=True)
+
+# 9) 비교 바구니
+with tabs[8]:
+    render_basket()

@@ -19,6 +19,18 @@ MODEL = "claude-sonnet-4-6"
 
 MP_URL = "https://materialsproject.org/materials/{}"
 
+# 공개 배포 비용 가드(누구나 접근 시 API 크레딧 무단 소모 방지).
+# secrets로 덮어쓸 수 있다: CHAT_MAX_INPUT_CHARS, CHAT_MAX_MESSAGES.
+def _limit(name, default):
+    try:
+        return int(st.secrets.get(name, default))
+    except Exception:
+        return default
+
+
+MAX_INPUT_CHARS = _limit("CHAT_MAX_INPUT_CHARS", 600)       # 입력 1건 최대 길이
+MAX_MESSAGES_PER_SESSION = _limit("CHAT_MAX_MESSAGES", 25)  # 세션당 질문 수 상한
+
 APP_LABELS = {
     "general": "일반 탐색",
     "highk": "고유전율 게이트 (high-k)",
@@ -259,6 +271,10 @@ def execute_screening(args: dict):
             "has_Hf_or_Zr": bool(r.has_hf_zr),
             "is_TM_oxide": bool(r.is_tm_oxide),
             "ald_synthesizable": bool(r.is_ald),
+            "spacegroup": r.spacegroup,
+            "point_group": r.point_group,
+            "is_polar": bool(r.is_polar),        # 극성 점군(강유전 1차 선별)
+            "band_gap_corr_eV": _f(r.band_gap_corr, 2),  # PBE 보정 추정 Eg
             "Debye_K": _f(r.Debye, 0),
             "discovery_score": _f(r.score, 1),
         })
@@ -436,6 +452,16 @@ def render_chat_panel():
         st.session_state.chat_history = []
 
     prompt = st.chat_input("메시지를 입력하세요…")
+
+    # 공개 앱 비용 가드: 입력 길이·세션 질문 수 초과 시 처리하지 않음.
+    if prompt and len(prompt) > MAX_INPUT_CHARS:
+        st.warning(f"질문이 너무 깁니다({len(prompt)}자). {MAX_INPUT_CHARS}자 이내로 줄여 주세요.")
+        prompt = None
+    if prompt and sum(1 for m in st.session_state.chat_history
+                      if m["role"] == "user") >= MAX_MESSAGES_PER_SESSION:
+        st.warning(f"이 세션의 질문 한도({MAX_MESSAGES_PER_SESSION}회)에 도달했습니다. "
+                   "새로고침하면 초기화됩니다.")
+        prompt = None
 
     # 이번 턴 이전까지의 대화를 먼저 그린다(스트리밍될 새 답변은 그 아래에 쌓는다).
     existing = st.session_state.chat_history
