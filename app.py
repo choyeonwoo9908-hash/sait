@@ -12,7 +12,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-import physics as phys
+import phys_models as phys
 import data as datamod
 import chatbot
 

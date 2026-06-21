@@ -11,7 +11,7 @@ import pandas as pd
 import streamlit as st
 from mp_api.client import MPRester
 
-import physics as phys
+import phys_models as phys
 
 _BUILTIN_MP_KEY = "jQlXCiEJQLNOjMZiV7es4Fgc7FIyyOOZ"  # MP 무료 API 기본 키(env/secrets의 MP_API_KEY가 우선)
 
