@@ -266,6 +266,47 @@ def thickness_for_eot(eot_nm, kappa):
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# 1b. 게이트 스택 소자 1차 예측 (TCAD 연동 방향 — illustrative)
+#   스크리닝/공정 파라미터(κ·Eg·EOT)에서 커패시턴스·누설·밴드정렬을 해석적으로
+#   추정한다. 풀 TCAD(Sentaurus/Silvaco)로 가는 입력·방향을 보여주는 예시 모델.
+# ──────────────────────────────────────────────────────────────────────────
+_EPS0_F_PER_CM = 8.854e-14   # 진공 유전율 (F/cm)
+
+
+def gate_cap_density(eot_nm):
+    """게이트 단위면적 커패시턴스 C_ox (µF/cm²) = ε0·κ_SiO2 / EOT. (정확)"""
+    if not _pos(eot_nm):
+        return None
+    return _EPS0_F_PER_CM * EPS_SIO2 / (eot_nm * 1e-7) * 1e6
+
+
+def band_offsets(eg_ev):
+    """유전체–Si 밴드오프셋(ΔEc, ΔEv) 1차 추정(illustrative).
+
+    Eg 차이를 전도대/가전자대에 ~60/40으로 배분(산화물 경험칙). 실제 오프셋은
+    전자친화도·계면 쌍극자에 좌우되므로 정밀값은 측정/계산이 필요하다.
+    """
+    if eg_ev is None or not np.isfinite(eg_ev):
+        return None
+    delta = max(0.0, float(eg_ev) - EG_SI)
+    d_ec = 0.6 * delta
+    return d_ec, delta - d_ec
+
+
+def gate_leakage(t_phys_nm, barrier_ev, m_eff=0.4, j0=1.0e6):
+    """게이트 직접터널링 누설 J(A/cm²) 1차 추정 = J0·exp(−2κt) (illustrative).
+
+    κ=√(2 m* q Φb)/ħ. 고-κ가 같은 EOT에서 더 두꺼운 물리두께로 누설을 낮추는
+    '경향'을 보여주는 해석 모델로, 절대값은 보정용 J0에 의존(정밀 TCAD 아님).
+    """
+    if not _pos(t_phys_nm, barrier_ev):
+        return None
+    m0, q, hbar = 9.109e-31, 1.602e-19, 1.055e-34
+    kap = np.sqrt(2.0 * m_eff * m0 * q * float(barrier_ev)) / hbar     # 1/m
+    return float(j0 * np.exp(-2.0 * kap * (t_phys_nm * 1e-9)))
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # 2. 탄성/열적 물성 (박막 열 안정성 보조 지표; B=부피, G=전단 탄성률)
 # ──────────────────────────────────────────────────────────────────────────
 def pugh_ratio(bulk_gpa, shear_gpa):

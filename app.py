@@ -366,7 +366,8 @@ def render_basket():
 
 tabs = st.tabs(["개요", "고유전율 (High-k)", "강유전체 (FeRAM/FeFET)",
                 "NAND 산화물", "저항변화 (RRAM)",
-                "화학공간 탐색", "추천 후보", "데이터", "비교 바구니", "ALD 공정"])
+                "화학공간 탐색", "추천 후보", "데이터", "비교 바구니", "ALD 공정",
+                "소자 시뮬레이션"])
 
 df = st.session_state.get("df")
 
@@ -739,3 +740,78 @@ with tabs[9]:
         st.caption("※ Materials Project 조성 + ALD 문헌 일반값을 결합한 1차 공정 설계 "
                    "가이드입니다. 실제 GPC·온도창·막질은 전구체 순도·장비·기판에 따라 "
                    "달라지므로 공정 최적화가 필요합니다.")
+
+# 11) 소자 시뮬레이션 (TCAD 연동 방향)
+with tabs[10]:
+    st.markdown("**소자 시뮬레이션 (TCAD 연동 방향)** — 스크리닝·공정 파라미터(κ·Eg·EOT)에서 "
+                "게이트 스택의 **커패시턴스·누설·밴드정렬**을 1차 예측합니다. 풀 TCAD"
+                "(Sentaurus/Silvaco) 연동의 *방향*을 보여주는 예시입니다.")
+    hk = df[df.highk_fom.notna() & df.kappa_reliable].sort_values(
+        "highk_fom", ascending=False)        # 게이트 유전체로 좋은 순(κ·Eg)
+    if hk.empty:
+        st.info("유전율(κ) 데이터가 있는 게이트 유전체 후보가 없습니다. "
+                "high-k 조건으로 스크리닝해 보세요.")
+    else:
+        opts = {f"{r.formula} · κ={r.kappa:.1f} · Eg={r.band_gap:.2f}eV ({r.material_id})":
+                r.material_id for _, r in hk.head(40).iterrows()}
+        pick = st.selectbox("게이트 유전체 후보 선택", list(opts), key="dev_pick")
+        row = hk[hk.material_id == opts[pick]].iloc[0]
+        kap, eg = float(row.kappa), float(row.band_gap)
+        dEc, dEv = phys.band_offsets(eg) or (0.0, 0.0)
+        dEc_si, _ = phys.band_offsets(phys.EG_SIO2) or (0.0, 0.0)
+        floor = lambda j: max(j, 1e-9) if j else 1e-9      # 표시용 누설 하한(다른 기구)
+
+        eot = st.slider("목표 EOT (nm)", 0.5, 3.0, 1.0, 0.1, key="dev_eot")
+        t_phys = phys.thickness_for_eot(eot, kap)
+        cox = phys.gate_cap_density(eot)
+        j_mat = floor(phys.gate_leakage(t_phys, dEc))
+        m = st.columns(4)
+        m[0].metric("게이트 C_ox", f"{cox:.2f} µF/cm²" if cox else "—")
+        m[1].metric("물리두께", f"{t_phys:.1f} nm" if t_phys else "—",
+                    help=f"같은 EOT의 SiO₂는 {eot:.1f} nm — 고-κ라 더 두껍게 쌓을 수 있음")
+        m[2].metric("ΔEc (전자 배리어)", f"~{dEc:.1f} eV")
+        m[3].metric("추정 게이트 누설", f"{j_mat:.0e} A/cm²",
+                    help="직접터널링 1차 추정(예시). 우측 SiO₂ 대비 곡선 참고.")
+
+        c1, c2 = st.columns(2)
+        with c1:
+            eots = np.linspace(0.5, 3.0, 30)
+            jm = [floor(phys.gate_leakage(phys.thickness_for_eot(e, kap), dEc)) for e in eots]
+            js = [floor(phys.gate_leakage(e, dEc_si)) for e in eots]
+            figj = go.Figure()
+            figj.add_trace(go.Scatter(x=eots, y=js, name="SiO₂ (기준)",
+                                      line=dict(color="#c55a11", width=2)))
+            figj.add_trace(go.Scatter(x=eots, y=jm, name=f"{row.formula} (고-κ)",
+                                      line=dict(color="#1f4e79", width=2)))
+            figj.update_yaxes(type="log", title="게이트 누설 J (A/cm², 예시)",
+                              exponentformat="power")
+            figj.update_xaxes(title="EOT (nm)")
+            figj.update_layout(title="EOT–누설: EOT를 줄일수록 SiO₂는 폭증, 고-κ는 억제",
+                               legend=dict(x=0.99, y=0.99, xanchor="right", yanchor="top",
+                                           bgcolor="rgba(255,255,255,0.6)"))
+            st.plotly_chart(fig_layout(figj, 380), use_container_width=True)
+        with c2:
+            ec_si, ev_si = 0.0, -phys.EG_SI
+            ec_d, ev_d = dEc, dEc - eg
+            figb = go.Figure()
+            figb.add_vrect(x0=1, x1=2.3, fillcolor="#9dc3e6", opacity=0.15, line_width=0)
+            figb.add_trace(go.Scatter(x=[0, 1], y=[0, 0], mode="lines",
+                                      line=dict(color="#7f8c98", width=4), name="금속 E_F"))
+            figb.add_trace(go.Scatter(x=[1, 1, 2.3, 2.3, 3.5], y=[0, ec_d, ec_d, ec_si, ec_si],
+                                      mode="lines", line=dict(color="#1f4e79", width=3), name="Ec"))
+            figb.add_trace(go.Scatter(x=[1, 2.3, 2.3, 3.5], y=[ev_d, ev_d, ev_si, ev_si],
+                                      mode="lines", line=dict(color="#548235", width=3), name="Ev"))
+            figb.add_annotation(x=1.65, y=ec_d + 0.5, text=f"{row.formula} (Eg={eg:.1f})",
+                                showarrow=False, font=dict(size=11, color="#1f4e79"))
+            figb.add_annotation(x=2.3, y=(ec_d + ec_si) / 2, text=f"ΔEc≈{dEc:.1f}",
+                                showarrow=False, font=dict(size=10), xanchor="left")
+            figb.update_yaxes(title="에너지 (eV)")
+            figb.update_xaxes(tickvals=[0.5, 1.65, 2.9], ticktext=["금속", "유전체", "Si"])
+            figb.update_layout(title="게이트 스택 밴드 정렬 (모식도)", showlegend=False)
+            st.plotly_chart(fig_layout(figb, 380), use_container_width=True)
+
+        st.caption("※ 해석적 1차 모델(예시): **C_ox는 정확**, 누설은 직접터널링 "
+                   "J=J₀·exp(−2κt) **경향**(절대값 미보정·하한 1e-9 표시), 밴드오프셋은 PBE Eg "
+                   "기반 추정입니다. **풀 TCAD로 가면** 트랩·계면상태 포함 C–V, 이동도·구동전류, "
+                   "신뢰성(TDDB/BTI), 전체 I–V를 물질 파라미터에서 정밀 계산할 수 있고 — "
+                   "이 플랫폼이 그 입력을 자동으로 제공합니다.")
