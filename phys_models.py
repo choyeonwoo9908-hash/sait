@@ -65,6 +65,43 @@ ALD_CATIONS = {
     "B", "Sb", "Bi",
 }
 
+# ALD 전구체 지식 베이스 (양이온 → (대표 전구체, T_lo°C, T_hi°C, GPC[Å/cycle])).
+# 문헌 일반값 기반의 1차 공정 설계용 — 실제 GPC·온도창은 전구체·장비·기판에 따라
+# 달라지므로 보정이 필요하다. 공반응물은 막종(산화물=O계열/질화물=N계열)으로 결정.
+ALD_PRECURSORS = {
+    "Hf": ("TEMAHf / TDMAHf", 200, 300, 1.0),
+    "Zr": ("TEMAZr / TDMAZr", 200, 300, 1.0),
+    "Al": ("TMA (트리메틸알루미늄)", 150, 300, 1.1),
+    "Ti": ("TiCl₄ / TDMAT", 150, 300, 0.5),
+    "Ta": ("PDMAT / Ta(OEt)₅", 200, 300, 0.5),
+    "La": ("La(iPrAMD)₃", 200, 300, 0.4),
+    "Y":  ("Y(iPrCp)₃ / Y(thd)₃", 250, 350, 0.4),
+    "Si": ("BDEAS / 3DMAS", 200, 400, 0.8),
+    "Zn": ("DEZ (디에틸아연)", 120, 200, 1.8),
+    "Sn": ("TDMASn", 150, 250, 0.5),
+    "Nb": ("Nb(OEt)₅ / NbCl₅", 200, 300, 0.4),
+    "V":  ("VO(OiPr)₃ / VCl₄", 150, 250, 0.4),
+    "Mo": ("MoF₆ / Mo(thd) 계열", 200, 300, 0.4),
+    "W":  ("WF₆ / W(CO)₆", 200, 350, 0.4),
+    "Sr": ("Sr(iPr₃Cp)₂", 200, 300, 0.6),
+    "Ba": ("Ba(iPr₃Cp)₂", 250, 350, 0.5),
+    "Ga": ("TMGa (트리메틸갈륨)", 150, 300, 0.5),
+    "In": ("InCp / TMIn", 150, 300, 0.5),
+    "Mg": ("Mg(EtCp)₂", 200, 300, 1.0),
+    "Ce": ("Ce(iPrCp)₃ / Ce(thd)₄", 200, 300, 0.4),
+    "Gd": ("Gd(thd)₃ / Gd(iPrCp)₃", 200, 300, 0.4),
+    "Ni": ("NiCp₂ / Ni 아미디네이트", 200, 300, 0.4),
+    "Co": ("CoCp₂ / Co 아미디네이트", 200, 300, 0.4),
+    "Fe": ("FeCp₂ / Fe(thd)₃", 200, 350, 0.3),
+    "Mn": ("Mn(EtCp)₂", 150, 300, 0.4),
+    "Cr": ("CrCp₂ / CrO₂Cl₂", 200, 350, 0.3),
+    "Cu": ("Cu 아미디네이트 / Cu(hfac)₂", 150, 250, 0.3),
+    "Ru": ("Ru(EtCp)₂", 200, 350, 0.5),
+    "Pt": ("MeCpPtMe₃", 200, 300, 0.5),
+    "Ir": ("Ir(acac)₃ / Ir(EtCp)(COD)", 200, 300, 0.4),
+    "Bi": ("BiPh₃ / Bi(OtBu)₃", 150, 300, 0.4),
+}
+
 # 극성(polar) 점군 — 강유전성의 결정학적 필요조건. 자발 분극이 가능한 10개 점군.
 # 강유전체는 반드시 이 중 하나이지만 충분조건은 아니다(스위칭 가능한 준안정 극성
 # 상이어야 함; 예: HfO2 강유전상은 orthorhombic Pca2₁ = 공간군 #29, 점군 mm2).
@@ -168,6 +205,64 @@ def ald_synthesizable(elements, allow_nitride=True):
     if not cations.issubset(ALD_CATIONS):  # 미확립 양이온이 있으면 제외
         return False
     return len(els) <= 3                    # 이원~삼원계까지만
+
+
+def ald_recipe(elements):
+    """조성에 대한 ALD 공정 레시피(1차 추정)를 만든다.
+
+    각 양이온의 대표 전구체, 공반응물(산화물=O계열/질화물=N계열), 권장 증착
+    온도창(양이온 온도창의 교집합), 평균 GPC(Å/cycle)를 모은다. 미등록 양이온이
+    있으면 그 목록도 반환한다. 다성분(이원계 이상)은 슈퍼사이클이 필요하다.
+    산화물/질화물이 아니거나 양이온이 없으면 None.
+    """
+    els = list(elements or [])
+    is_ox, is_nit = ("O" in els), ("N" in els)
+    cations = [e for e in els if e not in ("O", "N")]
+    if not cations or not (is_ox or is_nit):
+        return None
+    rows, gpcs, lows, highs, missing = [], [], [], [], []
+    for c in cations:
+        info = ALD_PRECURSORS.get(c)
+        if info:
+            prec, lo, hi, gpc = info
+            rows.append({"cation": c, "precursor": prec})
+            gpcs.append(gpc); lows.append(lo); highs.append(hi)
+        else:
+            rows.append({"cation": c, "precursor": "전구체 미등록 (문헌 확인 필요)"})
+            missing.append(c)
+    co_reactant = ("NH₃ 또는 N₂/H₂ 플라즈마" if (is_nit and not is_ox)
+                   else "H₂O 또는 O₃ (필요 시 O₂ 플라즈마)")
+    if lows and highs:
+        t_lo, t_hi = max(lows), min(highs)
+        overlap = t_lo <= t_hi
+        if not overlap:                       # 양이온별 창이 겹치지 않음
+            t_lo, t_hi = min(lows), max(highs)
+    else:
+        t_lo = t_hi = None
+        overlap = None
+    return {
+        "precursors": rows,
+        "co_reactant": co_reactant,
+        "t_lo": t_lo, "t_hi": t_hi, "t_overlap": overlap,
+        "gpc": (sum(gpcs) / len(gpcs)) if gpcs else None,
+        "supercycle": len(cations) > 1,
+        "missing": missing,
+        "film": "질화물" if (is_nit and not is_ox) else "산화물",
+    }
+
+
+def ald_cycles(gpc_a, thickness_nm):
+    """목표 물리두께(nm)를 얻기 위한 ALD 사이클 수 = 두께/GPC (nm→Å 환산)."""
+    if not _pos(gpc_a, thickness_nm):
+        return None
+    return int(round(thickness_nm * 10.0 / gpc_a))
+
+
+def thickness_for_eot(eot_nm, kappa):
+    """목표 EOT(nm)를 만족하는 high-k 물리두께(nm) = EOT·κ/κ_SiO2."""
+    if not _pos(kappa, eot_nm):
+        return None
+    return float(eot_nm) * float(kappa) / EPS_SIO2
 
 
 # ──────────────────────────────────────────────────────────────────────────

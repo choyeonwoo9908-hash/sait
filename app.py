@@ -366,18 +366,19 @@ def render_basket():
 
 tabs = st.tabs(["개요", "고유전율 (High-k)", "강유전체 (FeRAM/FeFET)",
                 "NAND 산화물", "저항변화 (RRAM)",
-                "화학공간 탐색", "추천 후보", "데이터", "비교 바구니"])
+                "화학공간 탐색", "추천 후보", "데이터", "비교 바구니", "ALD 공정"])
 
 df = st.session_state.get("df")
 
 if df is None or df.empty:
-    for t in tabs[:-1]:
+    for i, t in enumerate(tabs):
         with t:
-            st.info("사이드바에서 **스크리닝 실행**을 누르거나, 위의 "
-                    "**AI 어시스턴트 열기** 버튼으로 자연어로 질문해 "
-                    "메모리 소재 후보를 찾아보세요.")
-    with tabs[-1]:
-        render_basket()          # 바구니는 데이터가 없어도 접근 가능
+            if i == 8:           # 비교 바구니는 데이터가 없어도 접근 가능
+                render_basket()
+            else:
+                st.info("사이드바에서 **스크리닝 실행**을 누르거나, 위의 "
+                        "**AI 어시스턴트 열기** 버튼으로 자연어로 질문해 "
+                        "메모리 소재 후보를 찾아보세요.")
     st.stop()
 
 # 1) 개요
@@ -684,3 +685,57 @@ with tabs[7]:
 # 9) 비교 바구니
 with tabs[8]:
     render_basket()
+
+# 10) ALD 공정 레시피 (스크리닝 → 합성 연결)
+with tabs[9]:
+    st.markdown("**스크리닝 → 합성: ALD 공정 레시피** — 추출된 후보를 골라 "
+                "원자층증착(ALD) 전구체·공반응물·온도창·**사이클 수**까지 1차 설계합니다. "
+                "발굴에서 그치지 않고 *어떻게 만들지*로 바로 이어집니다.")
+    aldable = df[df.is_ald].sort_values("score", ascending=False)
+    if aldable.empty:
+        st.info("ALD 합성 유망 후보가 없습니다. 사이드바 'ALD 합성 가능 물질만'을 켜거나 "
+                "조건을 넓혀보세요.")
+    else:
+        opts = {f"{r.formula}  ·  {r.material_id}  (점수 {r.score:.0f})": r.material_id
+                for _, r in aldable.head(50).iterrows()}
+        pick = st.selectbox("후보 선택 (ALD 가능 · 발굴점수 상위)", list(opts))
+        row = aldable[aldable.material_id == opts[pick]].iloc[0]
+        rec = phys.ald_recipe(list(row.elements))
+        if rec is None:
+            st.warning("이 조성은 ALD 산화물/질화물 레시피로 직접 다루기 어렵습니다.")
+        else:
+            c1, c2 = st.columns([3, 2])
+            with c1:
+                st.markdown(f"#### {row.formula} — ALD {rec['film']} 공정")
+                pdf = pd.DataFrame(rec["precursors"]).rename(
+                    columns={"cation": "양이온", "precursor": "대표 전구체"})
+                st.dataframe(pdf, hide_index=True, use_container_width=True)
+                st.markdown(f"- **공반응물:** {rec['co_reactant']}")
+                if rec["t_lo"] is not None:
+                    warn = "" if rec["t_overlap"] else "  ⚠️ 양이온별 온도창이 달라 좁음"
+                    st.markdown(f"- **권장 증착 온도:** {rec['t_lo']}–{rec['t_hi']} °C{warn}")
+                if rec["gpc"]:
+                    st.markdown(f"- **GPC(평균):** ~{rec['gpc']:.2f} Å/cycle")
+                if rec["supercycle"]:
+                    st.markdown("- **다성분 조성** → 양이온 sub-cycle을 번갈아 쌓는 "
+                                "**슈퍼사이클**(비율 보정) 필요.")
+                if rec["missing"]:
+                    st.markdown(f"- ⚠️ **전구체 미등록:** {', '.join(rec['missing'])} (문헌 확인)")
+            with c2:
+                st.markdown("**🎯 두께 → 사이클 계산**")
+                kap = float(row.kappa) if pd.notna(row.kappa) and row.kappa > 0 else None
+                if kap:
+                    eot_t = st.slider("목표 EOT (nm)", 0.5, 3.0, 1.0, 0.1, key="ald_eot")
+                    t_phys = phys.thickness_for_eot(eot_t, kap)
+                    cyc = phys.ald_cycles(rec["gpc"], t_phys)
+                    m = st.columns(2)
+                    m[0].metric("필요 물리두께", f"{t_phys:.1f} nm" if t_phys else "—")
+                    m[1].metric("ALD 사이클 수", f"{cyc}" if cyc else "—")
+                    st.caption(f"κ={kap:.1f} 기준. 목표 EOT가 작을수록(미세화) 두께·사이클↑.")
+                else:
+                    t_t = st.slider("목표 물리두께 (nm)", 1.0, 20.0, 5.0, 0.5, key="ald_thick")
+                    cyc = phys.ald_cycles(rec["gpc"], t_t)
+                    st.metric("ALD 사이클 수", f"{cyc}" if cyc else "—")
+        st.caption("※ Materials Project 조성 + ALD 문헌 일반값을 결합한 1차 공정 설계 "
+                   "가이드입니다. 실제 GPC·온도창·막질은 전구체 순도·장비·기판에 따라 "
+                   "달라지므로 공정 최적화가 필요합니다.")
