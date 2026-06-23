@@ -428,6 +428,14 @@ _SCORE_WEIGHTS = {
 }
 
 
+def score_weights(application="general"):
+    """응용별 발굴점수 4축 가중치(합 100)의 사본.
+
+    UI에서 축별 점수(=가중치×부분점수)를 '만점 대비 달성도(%)'로 환산할 때 쓴다.
+    """
+    return dict(_SCORE_WEIGHTS.get(application, _SCORE_WEIGHTS["general"]))
+
+
 def score_components(*, band_gap, e_above_hull, kappa=None,
                      is_oxide=False, has_hf_zr=False, is_tm_oxide=False,
                      is_ald=False, experimental=False, is_polar=False,

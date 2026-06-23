@@ -12,7 +12,8 @@ import data as d
 COLS = ["material_id", "formula", "band_gap", "band_gap_corr", "kappa", "kappa_reliable",
         "highk_fom", "eot_5nm", "is_oxide", "has_hf_zr", "is_tm_oxide", "is_ald",
         "e_above_hull", "is_stable", "crystal_system", "spacegroup", "point_group",
-        "is_polar", "score", "nsites", "nelements", "elements", "chemsys", "gap_kind",
+        "is_polar", "score", "score_stability", "score_manu", "score_durability",
+        "score_performance", "nsites", "nelements", "elements", "chemsys", "gap_kind",
         "is_metal"]
 
 
@@ -313,9 +314,12 @@ with tabs[0]:
         st.plotly_chart(kappa_eg_figure(df, "κ–Eg 트레이드오프 지도"),
                         use_container_width=True)
     with c2:
-        fig = px.histogram(df, x="band_gap", nbins=40, opacity=0.85,
-                           labels={"band_gap": "밴드갭 (eV)"}, title="밴드갭 분포")
-        fig.update_layout(yaxis_title="물질 수")
+        fig = px.histogram(df, x="band_gap", nbins=40, opacity=0.9,
+                           color="crystal_system",
+                           color_discrete_sequence=px.colors.qualitative.Set2,
+                           labels={"band_gap": "밴드갭 (eV)", "crystal_system": "결정계"},
+                           title="밴드갭 분포 (결정계별)")
+        fig.update_layout(yaxis_title="물질 수", legend_title_text="결정계")
         st.plotly_chart(fig_layout(fig), use_container_width=True)
 
 # 2) 고유전율
@@ -382,26 +386,65 @@ with tabs[3]:
 
 # 5) 추천 후보 (클릭 → MP)
 with tabs[4]:
-    st.markdown(f"**종합 발굴점수 Top 20** — `{preset}` 적합도로 산출한 휴리스틱 순위.")
+    st.markdown(f"**종합 발굴점수 Top 20 — 왜 이 점수인가** · `{preset}` 기준. "
+                "각 막대는 **안정성·상용성·내구성·성능** 4축 기여로 분해되며, "
+                "막대 길이가 곧 발굴점수입니다. (막대 클릭 → 아래 상세·MP 링크)")
+    _PRESET_APP = {"고유전율 게이트 (high-k)": "highk", "강유전체 (FeRAM/FeFET)": "ferroelectric",
+                   "저항변화 메모리 (RRAM)": "rram", "일반 탐색": "general"}
+    _WEIGHTS = {
+        "highk": dict(stability=22, manufacturability=28, durability=12, performance=38),
+        "general": dict(stability=22, manufacturability=28, durability=12, performance=38),
+        "ferroelectric": dict(stability=22, manufacturability=28, durability=10, performance=40),
+        "rram": dict(stability=22, manufacturability=28, durability=10, performance=40)}
     best = df.sort_values("score", ascending=False).head(20).reset_index(drop=True)
-    fig = px.bar(best, x="score", y="formula", orientation="h", color="band_gap",
-                 color_continuous_scale="Viridis", custom_data=["material_id"],
-                 labels={"score": "발굴점수", "formula": "", "band_gap": "Eg"},
-                 title="추천 메모리 반도체 소재 후보 (막대 클릭 → MP 페이지)")
-    fig.update_traces(hovertemplate="%{y}<br>발굴점수=%{x:.0f}<br><b>클릭 → MP 링크</b><extra></extra>")
-    fig.update_layout(yaxis=dict(autorange="reversed"))
-    ev = st.plotly_chart(fig_layout(fig, 600), use_container_width=True,
+    AXES = [("score_stability", "stability", "안정성", "🟦", "#4C78A8"),
+            ("score_manu", "manufacturability", "상용성", "🟧", "#F58518"),
+            ("score_durability", "durability", "내구성", "🟩", "#54A24B"),
+            ("score_performance", "performance", "성능", "🟥", "#E45756")]
+    cmap = {k: c for _, _, k, _, c in AXES}
+    longdf = best.melt(id_vars=["formula", "material_id", "score"],
+                       value_vars=[col for col, *_ in AXES], var_name="_ax", value_name="기여")
+    longdf["축"] = longdf["_ax"].map({col: k for col, _, k, _, _ in AXES})
+    fig = px.bar(longdf, x="기여", y="formula", color="축", orientation="h",
+                 color_discrete_map=cmap,
+                 category_orders={"축": [k for _, _, k, _, _ in AXES],
+                                  "formula": best.formula.tolist()},
+                 custom_data=["material_id"],
+                 labels={"기여": "발굴점수 기여", "formula": "", "축": "점수 축"},
+                 title="추천 소재 후보 · 점수 구성 (막대 클릭 → 상세)")
+    fig.update_layout(barmode="stack", yaxis=dict(autorange="reversed"),
+                      legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                  xanchor="right", x=1, title_text=""))
+    fig.update_traces(hovertemplate="%{y}<br>%{fullData.name} 기여=%{x:.1f}점<extra></extra>")
+    ev = st.plotly_chart(fig_layout(fig, 620), use_container_width=True,
                          on_select="rerun", selection_mode="points", key="rec")
     try:
         pts = ev["selection"]["points"]
     except (TypeError, KeyError):
         pts = []
-    if pts and pts[0].get("customdata"):
-        mid = pts[0]["customdata"][0]
-        st.link_button(f"🔗 {pts[0].get('y')} — Materials Project에서 열기",
-                       f"https://materialsproject.org/materials/{mid}")
-    else:
-        st.caption("막대를 클릭하면 해당 물질의 Materials Project 링크 버튼이 나타납니다.")
+    if pts and pts[0].get("y") in set(best.formula):
+        st.session_state["rec_sel"] = pts[0]["y"]
+    st.divider()
+    sel = st.selectbox("상세 분석할 물질 (레이더 차트)", best.formula.tolist(), key="rec_sel")
+    r0 = best[best.formula == sel].iloc[0]
+    w = _WEIGHTS.get(_PRESET_APP.get(preset, "general"), _WEIGHTS["general"])
+    theta = [k for _, _, k, _, _ in AXES]
+    rvals = [(getattr(r0, col) / w[wk] * 100.0 if w.get(wk) else 0.0) for col, wk, *_ in AXES]
+    cL, cR = st.columns([5, 4])
+    with cL:
+        st.metric(f"{sel} · 발굴점수", f"{r0.score:.1f} / 100")
+        for col, wk, k, emoji, _ in AXES:
+            v = getattr(r0, col); frac = (v / w[wk] * 100.0) if w.get(wk) else 0.0
+            st.write(f"{emoji} **{k}** — {v:.1f}점 ({frac:.0f}% · 만점 {w.get(wk, 0)})")
+        st.link_button(f"🔗 {sel} — Materials Project에서 열기",
+                       f"https://materialsproject.org/materials/{r0.material_id}")
+    with cR:
+        rfig = go.Figure(go.Scatterpolar(r=rvals + [rvals[0]], theta=theta + [theta[0]],
+                                         fill="toself", line_color="#4C78A8",
+                                         fillcolor="rgba(76,120,168,0.35)"))
+        rfig.update_layout(polar=dict(radialaxis=dict(range=[0, 100], ticksuffix="%")),
+                           showlegend=False, title=f"{sel} · 축별 달성도(%)")
+        st.plotly_chart(fig_layout(rfig, 360), use_container_width=True)
 
 # 6) ALD 공정
 with tabs[5]:
