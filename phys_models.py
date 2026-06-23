@@ -351,50 +351,121 @@ def _clip01(x):
     return float(np.clip(x, 0.0, 1.0))
 
 
+def _sat(x, x0):
+    """포화 곡선 0→0, ∞→1 (x0에서 ≈0.63). 계단 없이 큰 값일수록 완만히 가산."""
+    return float(1.0 - np.exp(-max(0.0, x) / x0)) if x0 > 0 else 0.0
+
+
+def _bell(x, center, width):
+    """가우시안 종형(중심 1.0). '적정 구간'을 절벽 없이 선호하게 한다."""
+    return float(np.exp(-((float(x) - center) / width) ** 2))
+
+
+# ── 발굴점수 4축 부분점수(각 0~1, 연속) ─────────────────────────────────────
+def _stability_subscore(eah):
+    """안정성: e_above_hull이 0에 가까울수록 1 (지수 감쇠, 0.03 eV에서 ≈0.37)."""
+    eah = eah if eah is not None else 0.5
+    return float(np.exp(-max(0.0, float(eah)) / 0.03))
+
+
+def _manufacturability_subscore(experimental, is_ald):
+    """상용성: DFT 안정 등재(기본 0.20) + 실험적 합성(+0.50) + ALD 가능(+0.30)."""
+    return 0.20 + (0.50 if experimental else 0.0) + (0.30 if is_ald else 0.0)
+
+
+def _durability_subscore(debye, hardness):
+    """내구성(박막 열·기계 안정성): Debye 온도·Vickers 경도 정규화 가중 평균.
+
+    탄성 데이터가 없으면 중립값 0.5(순위에 유불리 없음).
+    """
+    parts, wts = [], []
+    if _pos(debye):
+        parts.append(_clip01(float(debye) / 600.0)); wts.append(0.6)
+    if _pos(hardness):
+        parts.append(_clip01(float(hardness) / 20.0)); wts.append(0.4)
+    if not parts:
+        return 0.5
+    return float(sum(p * w for p, w in zip(parts, wts)) / sum(wts))
+
+
+def _performance_subscore(application, *, eg, eg_corr, kappa,
+                          is_oxide, has_hf_zr, is_tm_oxide, is_polar):
+    """응용별 성능 적합성(0~1, 연속). 모두 부드러운 포화/종형 함수로 변별력 확보."""
+    egc = float(eg_corr) if (eg_corr and eg_corr > 0) else (
+        float(eg) * PBE_GAP_SCISSOR if eg else 0.0)        # 보정 Eg(밴드오프셋용)
+    k = float(kappa) if _pos(kappa) else 0.0
+    fom_rel = (k * eg) / (EPS_SIO2 * EG_SIO2) if (k and eg) else 0.0   # κ·Eg (SiO2=1)
+    fom_n = _sat(fom_rel, 3.0)                              # 포화: HfO2≈0.75
+    if application in ("highk", "general"):
+        offset_n = _clip01((egc - 3.0) / 4.0)              # 누설 억제 밴드오프셋 여유
+        return 0.6 * fom_n + 0.4 * offset_n
+    if application == "dram_cap":
+        offset_n = _clip01((egc - 2.0) / 4.0)              # 커패시터: κ 비중↑
+        return 0.7 * fom_n + 0.3 * offset_n
+    if application == "nand_oxide":
+        wide = _clip01((egc - 4.0) / 5.0)                  # 블로킹/전하트랩: 넓은 Eg
+        return 0.75 * wide + 0.25 * fom_n
+    if application == "ferroelectric":
+        s = (0.25 if is_oxide else 0.0) + (0.35 if has_hf_zr else 0.0) \
+            + (0.30 if is_polar else 0.0)
+        s += 0.10 * _bell(egc, 5.8, 1.6)                   # HfO2계 강유전 적정 Eg창
+        return _clip01(s)
+    if application == "rram":
+        gate = 1.0 if is_tm_oxide else (0.3 if is_oxide else 0.0)
+        window = _bell(eg, 3.5, 1.6)                       # 스위칭 적정 Eg(PBE 기준)
+        return gate * (0.4 + 0.6 * window)
+    return 0.0
+
+
+# 응용별 4축 가중치(합 100). 상용성 비중을 높게 유지해 실제 소재가 상위에 오게 한다.
+_SCORE_WEIGHTS = {
+    "highk":         dict(stability=22, manufacturability=28, durability=12, performance=38),
+    "general":       dict(stability=22, manufacturability=28, durability=12, performance=38),
+    "dram_cap":      dict(stability=20, manufacturability=28, durability=12, performance=40),
+    "nand_oxide":    dict(stability=22, manufacturability=28, durability=15, performance=35),
+    "ferroelectric": dict(stability=22, manufacturability=28, durability=10, performance=40),
+    "rram":          dict(stability=22, manufacturability=28, durability=10, performance=40),
+}
+
+
+def score_components(*, band_gap, e_above_hull, kappa=None,
+                     is_oxide=False, has_hf_zr=False, is_tm_oxide=False,
+                     is_ald=False, experimental=False, is_polar=False,
+                     band_gap_corr=None, debye=None, hardness=None,
+                     application="general"):
+    """발굴점수의 4축 구성요소(가중 적용 점수)와 합계를 dict로 반환.
+
+    축: 안정성(hull) · 상용성(실험/ALD) · 내구성(Debye·경도) · 응용성능(κ·Eg·Eg창 등).
+    각 축은 0~1 연속 부분점수에 응용별 가중치(_SCORE_WEIGHTS, 합 100)를 곱한다.
+    이 분해를 그대로 노출하면 '왜 이 점수인지'를 설명할 수 있다.
+    """
+    if band_gap is None:
+        return dict(stability=0.0, manufacturability=0.0,
+                    durability=0.0, performance=0.0, total=0.0)
+    w = _SCORE_WEIGHTS.get(application, _SCORE_WEIGHTS["general"])
+    sub = dict(
+        stability=_clip01(_stability_subscore(e_above_hull)),
+        manufacturability=_clip01(_manufacturability_subscore(experimental, is_ald)),
+        durability=_clip01(_durability_subscore(debye, hardness)),
+        performance=_clip01(_performance_subscore(
+            application, eg=float(band_gap), eg_corr=band_gap_corr, kappa=kappa,
+            is_oxide=is_oxide, has_hf_zr=has_hf_zr,
+            is_tm_oxide=is_tm_oxide, is_polar=is_polar)),
+    )
+    pts = {k: round(w[k] * sub[k], 1) for k in w}
+    pts["total"] = round(min(100.0, sum(pts.values())), 1)
+    return pts
+
+
 def memory_score(*, band_gap, e_above_hull, kappa=None,
                  is_oxide=False, has_hf_zr=False, is_tm_oxide=False,
                  is_ald=False, experimental=False, is_polar=False,
+                 band_gap_corr=None, debye=None, hardness=None,
                  application="general"):
-    """메모리 응용별 휴리스틱 발굴 점수 (0~100).
-
-    세 축으로 구성해 '실제 상용 가능성'이 순위에 반영되게 한다:
-      (1) 안정성(hull) 0~30,
-      (2) 상용성 0~30 — 실험적으로 합성된 물질(+18) · ALD 합성 가능(+12),
-      (3) 응용 적합성 0~40 — high-k/DRAM은 κ·Eg와 밴드오프셋, NAND는 넓은 Eg,
-          강유전체는 Hf/Zr 산화물(+극성 가산), RRAM은 전이금속 산화물·스위칭 Eg.
-
-    (2)를 추가해, MP의 이색적·이론적 초고-κ 물질이 κ·Eg만으로 상위를 독식하고
-    실제 상용 소재(HfO2·Al2O3·ZrO2·Ta2O5 등)가 밀려나던 문제를 보정한다.
-    """
-    if band_gap is None:
-        return 0.0
-    eg = float(band_gap)
-
-    # (1) 안정성 (0~30): hull=0 → 30, ≥0.1 eV/atom → 0
-    eah = e_above_hull if e_above_hull is not None else 0.5
-    stab = 30.0 * _clip01(1.0 - min(eah, 0.1) / 0.1)
-
-    # (2) 상용성 (0~30): 실험적으로 알려진 물질 + ALD 합성 가능
-    prac = (18.0 if experimental else 0.0) + (12.0 if is_ald else 0.0)
-
-    # (3) 응용 적합성 (0~40)
-    k = float(kappa) if _pos(kappa) else None
-    fom = (k * eg) if k else 0.0          # κ·Eg (절대값; SiO2≈35)
-    app_pts = 0.0
-    if application in ("highk", "dram_cap", "general"):
-        offset = _clip01((eg - (2.0 if application == "dram_cap" else 3.0)) / 2.0)
-        app_pts = 40.0 * _clip01(fom / 250.0) * offset       # κ·Eg, 밴드오프셋 게이트
-    elif application == "nand_oxide":
-        app_pts = 40.0 * _clip01((eg - 3.0) / 5.0)           # 넓은 Eg(배리어)
-    elif application == "ferroelectric":
-        if is_oxide and has_hf_zr:
-            app_pts = 30.0 + (10.0 if is_polar else 0.0)     # 극성 상 가산
-        elif is_oxide:
-            app_pts = 10.0
-    elif application == "rram":
-        if is_tm_oxide and 2.0 <= eg <= 6.0:
-            app_pts = 40.0
-        elif is_tm_oxide:
-            app_pts = 18.0
-
-    return round(min(100.0, stab + prac + app_pts), 1)
+    """메모리 응용별 종합 발굴 점수(0~100) = score_components(...)["total"]."""
+    return score_components(
+        band_gap=band_gap, e_above_hull=e_above_hull, kappa=kappa,
+        is_oxide=is_oxide, has_hf_zr=has_hf_zr, is_tm_oxide=is_tm_oxide,
+        is_ald=is_ald, experimental=experimental, is_polar=is_polar,
+        band_gap_corr=band_gap_corr, debye=debye, hardness=hardness,
+        application=application)["total"]

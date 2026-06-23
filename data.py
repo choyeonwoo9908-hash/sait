@@ -142,14 +142,20 @@ def build_df(rows, app_key):
         lambda r: phys.debye_temperature(r.bulk, r.shear, r.density, r.nsites, r.volume),
         axis=1)
 
-    # ── 응용별 종합 발굴 점수 ───────────────────────────────────────────
-    df["score"] = df.apply(
-        lambda r: phys.memory_score(
+    # ── 응용별 종합 발굴 점수 (합계 + 4축 구성요소) ─────────────────────
+    comp = df.apply(
+        lambda r: phys.score_components(
             band_gap=r.band_gap, e_above_hull=r.e_above_hull, kappa=r.eps_total,
             is_oxide=r.is_oxide, has_hf_zr=r.has_hf_zr, is_tm_oxide=r.is_tm_oxide,
             is_ald=r.is_ald, experimental=(not r.theoretical), is_polar=r.is_polar,
+            band_gap_corr=r.band_gap_corr, debye=r.Debye, hardness=r.Hv,
             application=app_key),
         axis=1)
+    df["score_stability"] = comp.apply(lambda c: c["stability"])
+    df["score_manu"] = comp.apply(lambda c: c["manufacturability"])
+    df["score_durability"] = comp.apply(lambda c: c["durability"])
+    df["score_performance"] = comp.apply(lambda c: c["performance"])
+    df["score"] = comp.apply(lambda c: c["total"])
     return df
 
 
