@@ -66,8 +66,10 @@ ALD_CATIONS = {
 }
 
 # ALD 전구체 지식 베이스 (양이온 → (대표 전구체, T_lo°C, T_hi°C, GPC[Å/cycle])).
-# 문헌 일반값 기반의 1차 공정 설계용 — 실제 GPC·온도창은 전구체·장비·기판에 따라
-# 달라지므로 보정이 필요하다. 공반응물은 막종(산화물=O계열/질화물=N계열)으로 결정.
+# 값은 표준 ALD 문헌 및 Atomic Limits ALD Database(DOI:10.6100/ALDDatabase,
+# https://www.atomiclimits.com/alddatabase/)의 범위와 교차 검증한 대표값이다. 1차 공정
+# 설계용이며 실제 GPC·온도창은 전구체·장비·기판에 따라 보정이 필요하다(공정별 정밀값은
+# 위 DB 참조). 공반응물은 막종(산화물=O계열/질화물=N계열)으로 결정.
 ALD_PRECURSORS = {
     "Hf": ("TEMAHf / TDMAHf", 200, 300, 1.0),
     "Zr": ("TEMAZr / TDMAZr", 200, 300, 1.0),

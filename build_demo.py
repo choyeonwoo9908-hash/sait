@@ -462,7 +462,9 @@ with tabs[5]:
                 else:
                     tt = st.slider("목표 물리두께 (nm)", 1.0, 20.0, 5.0, 0.5, key="ald_t")
                     st.metric("ALD 사이클 수", f"{ald_cycles(rec['gpc'], tt)}")
-        st.caption("※ MP 조성 + ALD 문헌 일반값 결합한 1차 설계 가이드(실 공정은 최적화 필요).")
+        st.caption("※ MP 조성 + ALD 문헌 일반값 결합한 1차 설계 가이드(실 공정은 최적화 필요). "
+                   "전구체 참고: [Atomic Limits ALD Database](https://www.atomiclimits.com/alddatabase/) "
+                   "(DOI:10.6100/ALDDatabase).")
 
 # 7) 소자 시뮬레이션 (TCAD 방향)
 with tabs[6]:

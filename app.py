@@ -739,7 +739,9 @@ with tabs[9]:
                     st.metric("ALD 사이클 수", f"{cyc}" if cyc else "—")
         st.caption("※ Materials Project 조성 + ALD 문헌 일반값을 결합한 1차 공정 설계 "
                    "가이드입니다. 실제 GPC·온도창·막질은 전구체 순도·장비·기판에 따라 "
-                   "달라지므로 공정 최적화가 필요합니다.")
+                   "달라지므로 공정 최적화가 필요합니다. 전구체·공정 데이터 참고: "
+                   "[Atomic Limits ALD Database](https://www.atomiclimits.com/alddatabase/) "
+                   "(DOI:10.6100/ALDDatabase).")
 
 # 11) 소자 시뮬레이션 (TCAD 연동 방향)
 with tabs[10]:
