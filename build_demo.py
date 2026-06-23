@@ -310,14 +310,12 @@ with tabs[0]:
     st.divider()
     c1, c2 = st.columns(2)
     with c1:
-        st.plotly_chart(kappa_eg_figure(df, "κ–Eg 트레이드오프 지도 (메모리 유전체 핵심)"),
+        st.plotly_chart(kappa_eg_figure(df, "κ–Eg 트레이드오프 지도"),
                         use_container_width=True)
     with c2:
-        fig = px.scatter(df, x="band_gap", y="e_above_hull", color="crystal_system",
-                         size="nsites", hover_data=["formula"],
-                         labels={"band_gap": "밴드갭 (eV)", "e_above_hull": "E above hull"},
-                         title="안정성 vs 밴드갭")
-        fig.update_traces(marker=dict(opacity=0.7))
+        fig = px.histogram(df, x="band_gap", nbins=40, opacity=0.85,
+                           labels={"band_gap": "밴드갭 (eV)"}, title="밴드갭 분포")
+        fig.update_layout(yaxis_title="물질 수")
         st.plotly_chart(fig_layout(fig), use_container_width=True)
 
 # 2) 고유전율
@@ -328,23 +326,8 @@ with tabs[1]:
     if hk.empty:
         st.info("이 후보군에는 κ 데이터가 있는 high-k 후보가 적습니다. 다른 프리셋을 보세요.")
     else:
-        c1, c2 = st.columns([3, 2])
-        with c1:
-            st.plotly_chart(kappa_eg_figure(df[df.highk_fom.notna()], "κ–Eg 지도 · 색=발굴점수"),
-                            use_container_width=True)
-        with c2:
-            st.markdown("**high-k 유망 Top 12**")
-            tp = hk.sort_values("score", ascending=False).head(12)
-            st.dataframe(tp[["formula", "kappa", "band_gap", "band_gap_corr", "highk_fom",
-                             "eot_5nm", "is_ald", "score"]], use_container_width=True,
-                         hide_index=True, column_config={
-                             "kappa": st.column_config.NumberColumn("κ", format="%.1f"),
-                             "band_gap": st.column_config.NumberColumn("Eg", format="%.2f"),
-                             "band_gap_corr": st.column_config.NumberColumn("Eg보정", format="%.2f"),
-                             "highk_fom": st.column_config.NumberColumn("κ·Eg", format="%.1f"),
-                             "eot_5nm": st.column_config.NumberColumn("EOT", format="%.2f"),
-                             "is_ald": st.column_config.CheckboxColumn("ALD"),
-                             "score": st.column_config.NumberColumn("점수", format="%.0f")})
+        st.plotly_chart(kappa_eg_figure(df[df.highk_fom.notna()], "κ–Eg 지도 · 색=발굴점수"),
+                        use_container_width=True)
         st.caption("⚠️ Eg는 DFT(PBE)라 실제보다 낮습니다('Eg보정'=×1.5 추정). 실제 누설 여유는 더 나은 편.")
 
 # 3) 강유전체 (극성 공간군)
@@ -422,15 +405,16 @@ with tabs[4]:
 
 # 6) ALD 공정
 with tabs[5]:
-    st.markdown("**스크리닝 → 합성: ALD 공정 레시피** — 후보를 골라 전구체·공반응물·온도창·"
-                "**사이클 수**까지 1차 설계. 발굴에서 *어떻게 만들지*로.")
-    ald = df[df.is_ald].sort_values("score", ascending=False)
+    st.markdown("**스크리닝 → 합성: ALD 공정 레시피** — **산화물** 후보를 골라 전구체·공반응물·온도창·"
+                "**사이클 수**까지 1차 설계. 발굴에서 *어떻게 만들지*로. "
+                "(산소(O)와 화합물을 이루는 ALD 산화물만 표시)")
+    ald = df[df.is_ald & df.is_oxide].sort_values("score", ascending=False)
     if ald.empty:
-        st.info("이 후보군엔 ALD 가능 후보가 적습니다.")
+        st.info("이 후보군엔 ALD 가능 산화물 후보가 적습니다.")
     else:
         opts = {f"{r.formula} · {r.material_id} (점수 {r.score:.0f})": r.material_id
                 for _, r in ald.head(40).iterrows()}
-        pk = st.selectbox("후보 선택 (ALD 가능)", list(opts), key="ald_pick")
+        pk = st.selectbox("후보 선택 (ALD 산화물)", list(opts), key="ald_pick")
         row = ald[ald.material_id == opts[pk]].iloc[0]
         rec = ald_recipe(list(row.elements))
         if rec:

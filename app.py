@@ -398,14 +398,12 @@ with tabs[0]:
     st.divider()
     c1, c2 = st.columns(2)
     with c1:
-        st.plotly_chart(kappa_eg_figure(df, "κ–Eg 트레이드오프 지도 (메모리 유전체 핵심)"),
+        st.plotly_chart(kappa_eg_figure(df, "κ–Eg 트레이드오프 지도"),
                         use_container_width=True)
     with c2:
-        fig = px.scatter(df, x="band_gap", y="e_above_hull", color="crystal_system",
-                         size="nsites", hover_data=["formula", "material_id"],
-                         labels={"band_gap": "밴드갭 (eV)", "e_above_hull": "E above hull (eV/atom)"},
-                         title="안정성 vs 밴드갭")
-        fig.update_traces(marker=dict(opacity=0.7))
+        fig = px.histogram(df, x="band_gap", nbins=40, opacity=0.85,
+                           labels={"band_gap": "밴드갭 (eV)"}, title="밴드갭 분포")
+        fig.update_layout(yaxis_title="물질 수")
         st.plotly_chart(fig_layout(fig), use_container_width=True)
     c3, c4 = st.columns(2)
     with c3:
@@ -414,8 +412,10 @@ with tabs[0]:
         st.plotly_chart(fig_layout(px.pie(vc, names="결정계", values="수",
                         title="결정계 분포", hole=0.4)), use_container_width=True)
     with c4:
-        fig = px.histogram(df, x="band_gap", nbins=40, opacity=0.8,
-                           labels={"band_gap": "밴드갭 (eV)"}, title="밴드갭 분포")
+        kdf = df[df.kappa.notna() & df.kappa_reliable]
+        fig = px.histogram(kdf, x="kappa", nbins=40, opacity=0.85,
+                           labels={"kappa": "유전율 κ"}, title="유전율 κ 분포")
+        fig.update_layout(yaxis_title="물질 수")
         st.plotly_chart(fig_layout(fig), use_container_width=True)
 
 # 2) 고유전율 (High-k)
@@ -430,25 +430,8 @@ with tabs[1]:
     if hk.empty:
         st.info("유전율(κ) 데이터가 있는 후보가 없습니다. 조건(밴드갭·원소·안정성)을 넓혀보세요.")
     else:
-        c1, c2 = st.columns([3, 2])
-        with c1:
-            st.plotly_chart(kappa_eg_figure(hk_all, "κ–Eg 지도 · 색=발굴점수"),
-                            use_container_width=True)
-        with c2:
-            st.markdown("**high-k 유망 Top 12** (발굴점수 순)")
-            tp = hk.sort_values("score", ascending=False).head(12)
-            st.dataframe(tp[["formula", "kappa", "band_gap", "band_gap_corr",
-                             "highk_fom", "eot_5nm", "is_ald", "score"]],
-                         use_container_width=True, hide_index=True,
-                         column_config={
-                             "formula": st.column_config.TextColumn("물질"),
-                             "kappa": st.column_config.NumberColumn("κ", format="%.1f"),
-                             "band_gap": st.column_config.NumberColumn("Eg(eV)", format="%.2f"),
-                             "band_gap_corr": st.column_config.NumberColumn("Eg보정(eV)", format="%.2f"),
-                             "highk_fom": st.column_config.NumberColumn("κ·Eg(×SiO₂)", format="%.1f"),
-                             "eot_5nm": st.column_config.NumberColumn("EOT@5nm(nm)", format="%.2f"),
-                             "is_ald": st.column_config.CheckboxColumn("ALD"),
-                             "score": st.column_config.NumberColumn("발굴점수", format="%.0f")})
+        st.plotly_chart(kappa_eg_figure(hk_all, "κ–Eg 지도 · 색=발굴점수"),
+                        use_container_width=True)
         cap = ("발굴점수는 높은 κ·Eg와 함께 누설 억제에 필요한 충분한 밴드갭(밴드오프셋)을 "
                "동시에 반영합니다. κ가 커도 Eg가 작으면 누설로 감점됩니다. "
                "EOT가 작을수록 같은 물리두께로 더 큰 커패시턴스(미세화 유리).")
@@ -689,17 +672,18 @@ with tabs[8]:
 
 # 10) ALD 공정 레시피 (스크리닝 → 합성 연결)
 with tabs[9]:
-    st.markdown("**스크리닝 → 합성: ALD 공정 레시피** — 추출된 후보를 골라 "
+    st.markdown("**스크리닝 → 합성: ALD 공정 레시피** — 추출된 **산화물** 후보를 골라 "
                 "원자층증착(ALD) 전구체·공반응물·온도창·**사이클 수**까지 1차 설계합니다. "
-                "발굴에서 그치지 않고 *어떻게 만들지*로 바로 이어집니다.")
-    aldable = df[df.is_ald].sort_values("score", ascending=False)
+                "발굴에서 그치지 않고 *어떻게 만들지*로 바로 이어집니다. "
+                "(산소(O)와 화합물을 이루는 ALD 산화물만 표시)")
+    aldable = df[df.is_ald & df.is_oxide].sort_values("score", ascending=False)
     if aldable.empty:
-        st.info("ALD 합성 유망 후보가 없습니다. 사이드바 'ALD 합성 가능 물질만'을 켜거나 "
+        st.info("ALD 가능 산화물 후보가 없습니다. 사이드바 'ALD 합성 가능 물질만'을 켜거나 "
                 "조건을 넓혀보세요.")
     else:
         opts = {f"{r.formula}  ·  {r.material_id}  (점수 {r.score:.0f})": r.material_id
                 for _, r in aldable.head(50).iterrows()}
-        pick = st.selectbox("후보 선택 (ALD 가능 · 발굴점수 상위)", list(opts))
+        pick = st.selectbox("후보 선택 (ALD 산화물 · 발굴점수 상위)", list(opts))
         row = aldable[aldable.material_id == opts[pick]].iloc[0]
         rec = phys.ald_recipe(list(row.elements))
         if rec is None:
