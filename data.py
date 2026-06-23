@@ -60,6 +60,9 @@ def fetch(params: dict):
         band_gap=(params["bg_min"], params["bg_max"]),
         energy_above_hull=(0, params["hull"]),
         nsites=(1, params["nsites_max"]),
+        # 안정성순(hull 오름차순)으로 가져와, max_results 상한 안에서 가장 안정한
+        # = 실제로 흔히 쓰이는 소재가 먼저 포함되게 한다(단순 산화물 누락 방지).
+        _sort_fields=["energy_above_hull"],
         fields=FIELDS, num_chunks=1, chunk_size=params["max_results"],
     )
     if params["include"]:
@@ -144,6 +147,7 @@ def build_df(rows, app_key):
         lambda r: phys.memory_score(
             band_gap=r.band_gap, e_above_hull=r.e_above_hull, kappa=r.eps_total,
             is_oxide=r.is_oxide, has_hf_zr=r.has_hf_zr, is_tm_oxide=r.is_tm_oxide,
+            is_ald=r.is_ald, experimental=(not r.theoretical), is_polar=r.is_polar,
             application=app_key),
         axis=1)
     return df

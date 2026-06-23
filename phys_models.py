@@ -353,50 +353,48 @@ def _clip01(x):
 
 def memory_score(*, band_gap, e_above_hull, kappa=None,
                  is_oxide=False, has_hf_zr=False, is_tm_oxide=False,
+                 is_ald=False, experimental=False, is_polar=False,
                  application="general"):
     """메모리 응용별 휴리스틱 발굴 점수 (0~100).
 
-    공통: 열역학적 안정성(hull) 0~40점.
-    응용별: high-k/DRAM은 κ·Eg와 밴드오프셋 적정성, NAND 산화물은 넓은 Eg
-    (배리어), 강유전체는 Hf/Zr 산화물 적합성, RRAM은 전이금속 산화물·스위칭
-    적합 Eg를 평가한다. 화학·데이터가 맞지 않아도 안정성 점수는 유지된다.
+    세 축으로 구성해 '실제 상용 가능성'이 순위에 반영되게 한다:
+      (1) 안정성(hull) 0~30,
+      (2) 상용성 0~30 — 실험적으로 합성된 물질(+18) · ALD 합성 가능(+12),
+      (3) 응용 적합성 0~40 — high-k/DRAM은 κ·Eg와 밴드오프셋, NAND는 넓은 Eg,
+          강유전체는 Hf/Zr 산화물(+극성 가산), RRAM은 전이금속 산화물·스위칭 Eg.
+
+    (2)를 추가해, MP의 이색적·이론적 초고-κ 물질이 κ·Eg만으로 상위를 독식하고
+    실제 상용 소재(HfO2·Al2O3·ZrO2·Ta2O5 등)가 밀려나던 문제를 보정한다.
     """
     if band_gap is None:
         return 0.0
     eg = float(band_gap)
 
-    # 안정성 (0~40): hull=0 → 40, ≥0.1 eV/atom → 0
+    # (1) 안정성 (0~30): hull=0 → 30, ≥0.1 eV/atom → 0
     eah = e_above_hull if e_above_hull is not None else 0.5
-    stab = 40.0 * _clip01(1.0 - min(eah, 0.1) / 0.1)
+    stab = 30.0 * _clip01(1.0 - min(eah, 0.1) / 0.1)
 
+    # (2) 상용성 (0~30): 실험적으로 알려진 물질 + ALD 합성 가능
+    prac = (18.0 if experimental else 0.0) + (12.0 if is_ald else 0.0)
+
+    # (3) 응용 적합성 (0~40)
     k = float(kappa) if _pos(kappa) else None
-    fom = (k * eg) if k else 0.0          # κ·Eg (절대값)
-
+    fom = (k * eg) if k else 0.0          # κ·Eg (절대값; SiO2≈35)
     app_pts = 0.0
-    bonus = 0.0
-
     if application in ("highk", "dram_cap", "general"):
-        # κ·Eg가 크되, 누설 억제를 위한 밴드오프셋(≈넓은 Eg)도 갖춰야 함
         offset = _clip01((eg - (2.0 if application == "dram_cap" else 3.0)) / 2.0)
-        app_pts = 45.0 * _clip01(fom / 250.0) * offset
-        bonus = 15.0 * _clip01((k or 0.0) / 40.0)            # 고-κ 가산
+        app_pts = 40.0 * _clip01(fom / 250.0) * offset       # κ·Eg, 밴드오프셋 게이트
     elif application == "nand_oxide":
-        # 터널/블로킹 산화물: 넓은 밴드갭(높은 배리어)이 핵심
-        app_pts = 45.0 * _clip01((eg - 3.0) / 5.0)
-        bonus = 10.0 * _clip01((k or 0.0) / 15.0) if is_oxide else 0.0
+        app_pts = 40.0 * _clip01((eg - 3.0) / 5.0)           # 넓은 Eg(배리어)
     elif application == "ferroelectric":
-        # HfO2/ZrO2 계열 산화물 우대 (강유전 orthorhombic 상 형성 모재)
         if is_oxide and has_hf_zr:
-            app_pts = 45.0
+            app_pts = 30.0 + (10.0 if is_polar else 0.0)     # 극성 상 가산
         elif is_oxide:
-            app_pts = 12.0
-        bonus = 15.0 * _clip01((k or 0.0) / 30.0)
+            app_pts = 10.0
     elif application == "rram":
-        # 산소공공 기반 저항변화: 전이금속 산화물·스위칭 적합 Eg(≈2~6 eV)
         if is_tm_oxide and 2.0 <= eg <= 6.0:
-            app_pts = 45.0
+            app_pts = 40.0
         elif is_tm_oxide:
-            app_pts = 20.0
-        bonus = 10.0 * _clip01((k or 0.0) / 30.0)
+            app_pts = 18.0
 
-    return round(min(100.0, stab + app_pts + bonus), 1)
+    return round(min(100.0, stab + prac + app_pts), 1)
