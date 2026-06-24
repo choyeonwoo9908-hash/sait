@@ -5,6 +5,7 @@ app.py(사이드바 스크리닝)와 chatbot.py(AI 어시스턴트)가 동일한
 """
 from __future__ import annotations
 
+import math
 import os
 
 import pandas as pd
@@ -49,6 +50,11 @@ GAP_TYPE_ANY = "전체"
 GAP_TYPE_DIRECT = "직접갭만"
 GAP_TYPE_INDIRECT = "간접갭만"
 
+# 클라이언트 후처리 필터(ALD·비자성·탄성률·유전율)가 있을 때, 최종 표시 개수를
+# 채울 수 있도록 조회하는 후보 풀의 최소/최대 크기.
+_POSTFILTER_POOL = 1000
+_MAX_POOL = 2000
+
 
 def _vrh(x):
     return x.get("vrh") if isinstance(x, dict) else x
@@ -56,14 +62,17 @@ def _vrh(x):
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch(params: dict):
+    pool = int(params.get("pool", params.get("max_results", 300)))
+    chunk = max(1, min(pool, 1000))               # MP chunk 상한(1000) 준수
+    num_chunks = max(1, math.ceil(pool / chunk))
     q = dict(
         band_gap=(params["bg_min"], params["bg_max"]),
         energy_above_hull=(0, params["hull"]),
         nsites=(1, params["nsites_max"]),
-        # 안정성순(hull 오름차순)으로 가져와, max_results 상한 안에서 가장 안정한
+        # 안정성순(hull 오름차순)으로 가져와, 풀 상한 안에서 가장 안정한
         # = 실제로 흔히 쓰이는 소재가 먼저 포함되게 한다(단순 산화물 누락 방지).
         _sort_fields=["energy_above_hull"],
-        fields=FIELDS, num_chunks=1, chunk_size=params["max_results"],
+        fields=FIELDS, num_chunks=num_chunks, chunk_size=chunk,
     )
     if params["include"]:
         q["elements"] = params["include"]
@@ -71,6 +80,18 @@ def fetch(params: dict):
         q["exclude_elements"] = params["exclude"]
     if params["nelements"]:
         q["num_elements"] = (min(params["nelements"]), max(params["nelements"]))
+    # MP가 지원하는 필터는 서버에서 직접 적용 → 풀 상한이 '필터 후' 결과에 적용된다.
+    if params.get("exclude_metal"):
+        q["is_metal"] = False
+    if params.get("stable_only"):
+        q["is_stable"] = True
+    if params.get("exp_only"):
+        q["theoretical"] = False
+    gap_type = params.get("gap_type", GAP_TYPE_ANY)
+    if gap_type == GAP_TYPE_DIRECT:
+        q["is_gap_direct"] = True
+    elif gap_type == GAP_TYPE_INDIRECT:
+        q["is_gap_direct"] = False
     with MPRester(API_KEY) as mpr:
         docs = mpr.materials.summary.search(**q)
 
@@ -164,17 +185,26 @@ def run_screening(*, bg_min, bg_max, hull, nsites_max, max_results,
                   gap_type=GAP_TYPE_ANY, exclude_metal=False, stable_only=False,
                   exp_only=False, nonmag_only=False, bulk_min=0, eps_min=0.0,
                   ald_only=False, include_any=None):
-    """조회 + 파생물성 + 후처리 필터를 한 번에 수행해 정제된 DataFrame을 반환.
+    """조회 + 파생물성 + 후처리 필터를 수행해 정제된 DataFrame을 반환.
+
+    MP가 지원하는 필터(금속/안정/실험/직접갭)는 fetch에서 서버사이드로 적용하고,
+    MP 미지원·파생 지표 필터(ALD·비자성·탄성률·유전율)만 여기서 후처리한다.
+    후처리 필터가 결과를 줄이면 표시 개수(max_results)를 채우도록 더 큰 후보
+    풀을 조회한 뒤 마지막에 max_results로 자른다 → max_results는 '조회 수'가
+    아니라 '필터 적용 후 최종 표시 개수'를 의미한다.
 
     include_any: 주어지면 "이 중 하나라도 포함"(OR) 의미로 원소별 개별 조회를
-    수행해 material_id 기준으로 합친다. MP의 elements 필터는 AND 의미라서
-    강유전체(Hf 또는 Zr) 같은 OR 조건은 이렇게 처리한다. include(고정 AND
-    원소)와 함께 쓰면 각 OR 후보 원소에 include가 AND로 결합된다.
+    수행해 material_id 기준으로 합친다(MP의 elements는 AND 의미).
     """
+    # 후처리(클라이언트) 필터가 결과를 줄이면 더 큰 풀을 조회한다.
+    needs_pool = ald_only or nonmag_only or (bulk_min > 0) or (eps_min > 0)
+    pool = (int(max_results) if not needs_pool
+            else min(_MAX_POOL, max(int(max_results), _POSTFILTER_POOL)))
     base = dict(
         bg_min=bg_min, bg_max=bg_max, hull=hull, nsites_max=nsites_max,
-        max_results=max_results, include=include, exclude=exclude,
-        nelements=nelements,
+        pool=pool, include=include, exclude=exclude, nelements=nelements,
+        gap_type=gap_type, exclude_metal=exclude_metal,
+        stable_only=stable_only, exp_only=exp_only,
     )
     if include_any:
         rows, seen = [], set()
@@ -189,16 +219,7 @@ def run_screening(*, bg_min, bg_max, hull, nsites_max, max_results,
         rows = fetch(base)
     df = build_df(rows, app_key)
     if not df.empty:
-        if gap_type == GAP_TYPE_DIRECT:
-            df = df[df.gap_kind == "직접"]
-        elif gap_type == GAP_TYPE_INDIRECT:
-            df = df[df.gap_kind == "간접"]
-        if exclude_metal:
-            df = df[~df.is_metal]
-        if stable_only:
-            df = df[df.is_stable]
-        if exp_only:
-            df = df[~df.theoretical]
+        # 남은 후처리 필터(MP 미지원·파생 지표). 서버에서 거른 항목은 재적용해도 무해.
         if nonmag_only:
             df = df[~df.is_magnetic]
         if bulk_min > 0:
@@ -207,4 +228,5 @@ def run_screening(*, bg_min, bg_max, hull, nsites_max, max_results,
             df = df[df.eps_total.fillna(0) >= eps_min]
         if ald_only:
             df = df[df.is_ald]
+        df = df.head(int(max_results))            # 최종 표시 개수 상한
     return df.reset_index(drop=True)

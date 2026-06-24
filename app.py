@@ -174,7 +174,10 @@ with st.sidebar.expander("고급 물성 필터"):
     eps_min = st.slider("정적 유전율 최소 (ε)", 0.0, 50.0, 0.0, step=0.5)
     nonmag_only = st.checkbox("비자성 물질만", value=False)
 
-max_results = st.sidebar.number_input("최대 결과 수", 20, 2000, 300, step=20)
+max_results = st.sidebar.number_input(
+    "최대 결과 수 (필터 적용 후 표시)", 20, 2000, 300, step=20,
+    help="필터를 모두 적용한 뒤 보여줄 최종 후보 수입니다. ALD·비자성 등 후처리 "
+         "필터가 켜지면 이 개수를 채우도록 내부적으로 더 큰 후보 풀을 조회합니다.")
 run = st.sidebar.button("스크리닝 실행", type="primary", use_container_width=True)
 
 
