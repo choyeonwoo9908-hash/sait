@@ -1,0 +1,34 @@
+{
+  "name": "memory-screener-demo",
+  "version": "1.0.0",
+  "description": "메모리 반도체 소재 발굴 데모 (오프라인 데스크톱 앱)",
+  "main": "./build/electron/main.js",
+  "scripts": {
+    "dump": "dump-stlite-desktop-artifacts",
+    "serve": "cross-env NODE_ENV=production electron .",
+    "app:dir": "electron-builder --dir",
+    "app:win": "electron-builder --win"
+  },
+  "build": {
+    "appId": "com.semiscreener.demo",
+    "productName": "MemoryScreenerDemo",
+    "files": ["build/**/*"],
+    "win": {
+      "target": ["zip"],
+      "signAndEditExecutable": false
+    }
+  },
+  "stlite": {
+    "desktop": {
+      "files": ["streamlit_app.py"],
+      "entrypoint": "streamlit_app.py",
+      "dependencies": ["plotly", "pandas", "numpy"]
+    }
+  },
+  "devDependencies": {
+    "@stlite/desktop": "0.101.1",
+    "cross-env": "^7.0.3",
+    "electron": "34.3.0",
+    "electron-builder": "25.1.8"
+  }
+}

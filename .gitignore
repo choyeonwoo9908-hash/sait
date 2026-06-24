@@ -15,3 +15,9 @@ env/
 
 # 배포에 불필요한 대용량 로컬 자료(필요 없으면 주석 해제)
 # papers/
+
+# Windows 데스크톱 빌드 부산물(대용량) — 설정 파일만 추적
+desktop_win/node_modules/
+desktop_win/build/
+desktop_win/dist/
+desktop_win/streamlit_app.py

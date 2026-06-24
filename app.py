@@ -150,6 +150,34 @@ max_results = st.sidebar.number_input("최대 결과 수", 20, 2000, 300, step=2
 run = st.sidebar.button("스크리닝 실행", type="primary", use_container_width=True)
 
 
+# ── 데모 모드 (AI 비활성화: 데이터·차트만 보기) ──────────────────────────────
+def _secret_or_env(name):
+    """환경변수 → Streamlit secrets 순으로 값을 읽는다(없으면 None)."""
+    if os.environ.get(name):
+        return os.environ[name]
+    try:
+        return st.secrets.get(name)
+    except Exception:
+        return None
+
+
+_AI_AVAILABLE = bool(_secret_or_env("ANTHROPIC_API_KEY"))
+_demo_flag = _secret_or_env("DEMO_MODE")
+_demo_default = ((str(_demo_flag).lower() in ("1", "true", "yes", "on"))
+                 if _demo_flag is not None else (not _AI_AVAILABLE))
+
+st.sidebar.divider()
+if not _AI_AVAILABLE:
+    demo_mode = True            # AI 키가 없으면 호출 불가 → 데모 모드 고정
+    st.sidebar.caption("🧪 **데모 모드** · AI 키 미설정 → 데이터·차트만 표시")
+else:
+    demo_mode = st.sidebar.toggle(
+        "🧪 데모 모드 (AI 끄기)", value=_demo_default, key="demo_mode",
+        help="켜면 AI 어시스턴트를 숨기고 데이터·차트만 보여줍니다(발표·비용 절감용). "
+             "방문 즉시 기본 스크리닝 결과가 표시됩니다. "
+             "기본값은 secrets의 DEMO_MODE로 지정할 수 있습니다.")
+
+
 # ── 시각화 레이아웃 ─────────────────────────────────────────────────────────
 def fig_layout(fig, h=420):
     fig.update_layout(template="plotly_white", height=h,
@@ -229,7 +257,10 @@ def kappa_eg_figure(dframe, title="κ–Eg 트레이드오프 지도", h=460):
 
 
 # ── 실행 ────────────────────────────────────────────────────────────────────
-if run:
+# 데모 모드에서 아직 결과가 없으면 첫 방문 시 기본 조건으로 자동 스크리닝한다
+# (방문자가 버튼을 누르지 않아도 바로 내용을 볼 수 있게).
+_auto_demo = demo_mode and st.session_state.get("df") is None
+if run or _auto_demo:
     with st.spinner("Materials Project 조회 및 물성 시뮬레이션 중…"):
         try:
             df_new = datamod.run_screening(
@@ -253,10 +284,13 @@ if run:
 # 대시보드는 전체 폭으로 두고, 챗봇은 버튼으로 여는 분리된 모달 창으로 띄운다.
 # 모달 안 스크리닝으로 st.session_state.df가 갱신되고, 창을 닫으면(전체 rerun)
 # 아래 대시보드가 최신 결과로 다시 그려진다.
-if st.button("AI 어시스턴트 열기", type="secondary",
-             help="메모리 소재 발굴 대화형 어시스턴트입니다. 자연어 요청을 스크리닝 "
-                  "조건으로 해석해 후보를 대시보드에 반영하고, 개념·물리 질문에는 "
-                  "근거와 함께 답변합니다."):
+if demo_mode:
+    st.caption("🧪 **데모 모드** — AI 어시스턴트는 꺼져 있습니다. "
+               "사이드바 조건으로 스크리닝하고 각 탭에서 결과를 살펴보세요.")
+elif st.button("AI 어시스턴트 열기", type="secondary",
+               help="메모리 소재 발굴 대화형 어시스턴트입니다. 자연어 요청을 스크리닝 "
+                    "조건으로 해석해 후보를 대시보드에 반영하고, 개념·물리 질문에는 "
+                    "근거와 함께 답변합니다."):
     chatbot.open_chat_dialog()
 
 # ── 비교 바구니 (여러 스크리닝에서 관심 물질 수집) ───────────────────────────
@@ -376,6 +410,9 @@ if df is None or df.empty:
         with t:
             if i == 8:           # 비교 바구니는 데이터가 없어도 접근 가능
                 render_basket()
+            elif demo_mode:
+                st.info("조건에 맞는 후보가 없습니다. 사이드바에서 "
+                        "**스크리닝 조건**을 넓힌 뒤 **스크리닝 실행**을 눌러보세요.")
             else:
                 st.info("사이드바에서 **스크리닝 실행**을 누르거나, 위의 "
                         "**AI 어시스턴트 열기** 버튼으로 자연어로 질문해 "
