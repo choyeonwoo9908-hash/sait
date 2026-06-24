@@ -13,9 +13,9 @@ import streamlit as st
 
 import data as datamod
 
-# 속도·비용·품질 균형으로 Sonnet 4.6 사용(도구 라우팅+근거 기반 설명에 충분).
-# 최고 수준 추론이 필요하면 "claude-opus-4-8"로 교체.
-MODEL = "claude-sonnet-4-6"
+# 최고 수준 추론을 위해 Opus 4.8 사용. adaptive thinking + effort=low로 지연을 관리한다.
+# (비용·속도를 우선하려면 "claude-sonnet-4-6"으로 교체 가능.)
+MODEL = "claude-opus-4-8"
 
 MP_URL = "https://materialsproject.org/materials/{}"
 
