@@ -163,6 +163,19 @@ nelements = st.sidebar.multiselect("원소 개수", [1, 2, 3, 4, 5],
                                    default=[], help="비우면 전체. 2=이원계, 3=삼원계 …")
 nsites_max = st.sidebar.slider("최대 원자 수 (단위셀)", 1, 60, 30)
 
+st.sidebar.markdown("**결정 구조**")
+_CRYSTAL_KO = {
+    "Cubic": "입방정 (Cubic)", "Hexagonal": "육방정 (Hexagonal)",
+    "Trigonal": "삼방정 (Trigonal)", "Tetragonal": "정방정 (Tetragonal)",
+    "Orthorhombic": "사방정 (Orthorhombic)", "Monoclinic": "단사정 (Monoclinic)",
+    "Triclinic": "삼사정 (Triclinic)",
+}
+crystal_systems = st.sidebar.multiselect(
+    "결정계 (선택 시 해당 결정계만)", datamod.CRYSTAL_SYSTEMS, default=[],
+    format_func=lambda c: _CRYSTAL_KO.get(c, c),
+    placeholder="결정계 선택 (예: Cubic, Tetragonal)",
+    help="선택한 결정계에 속하는 물질만 표시합니다(원소 선택과 동일 방식). 비우면 전체.")
+
 st.sidebar.markdown("**합성**")
 ald_only = st.sidebar.checkbox(
     "ALD 합성 가능 물질만", value=False,
@@ -305,7 +318,7 @@ if run or _auto_demo or _demo_run:
                 include_any=st.session_state.get("app_include_any"),
                 gap_type=gap_type, exclude_metal=exclude_metal, stable_only=stable_only,
                 exp_only=exp_only, nonmag_only=nonmag_only, bulk_min=bulk_min, eps_min=eps_min,
-                ald_only=ald_only)
+                ald_only=ald_only, crystal_systems=crystal_systems or None)
         except Exception as e:
             st.error(f"API 오류: {e}")
             st.stop()

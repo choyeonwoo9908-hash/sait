@@ -50,10 +50,14 @@ GAP_TYPE_ANY = "전체"
 GAP_TYPE_DIRECT = "직접갭만"
 GAP_TYPE_INDIRECT = "간접갭만"
 
-# 클라이언트 후처리 필터(ALD·비자성·탄성률·유전율)가 있을 때, 최종 표시 개수를
-# 채울 수 있도록 조회하는 후보 풀의 최소/최대 크기.
+# 클라이언트 후처리 필터(ALD·비자성·탄성률·유전율·결정계)가 있을 때, 최종 표시
+# 개수를 채울 수 있도록 조회하는 후보 풀의 최소/최대 크기.
 _POSTFILTER_POOL = 1000
 _MAX_POOL = 2000
+
+# 결정계(대칭성 높은→낮은 순). 사이드바 결정계 필터 옵션. 값은 MP 저장 표기와 일치.
+CRYSTAL_SYSTEMS = ["Cubic", "Hexagonal", "Trigonal", "Tetragonal",
+                   "Orthorhombic", "Monoclinic", "Triclinic"]
 
 
 def _vrh(x):
@@ -184,7 +188,7 @@ def run_screening(*, bg_min, bg_max, hull, nsites_max, max_results,
                   include, exclude, nelements, app_key,
                   gap_type=GAP_TYPE_ANY, exclude_metal=False, stable_only=False,
                   exp_only=False, nonmag_only=False, bulk_min=0, eps_min=0.0,
-                  ald_only=False, include_any=None):
+                  ald_only=False, crystal_systems=None, include_any=None):
     """조회 + 파생물성 + 후처리 필터를 수행해 정제된 DataFrame을 반환.
 
     MP가 지원하는 필터(금속/안정/실험/직접갭)는 fetch에서 서버사이드로 적용하고,
@@ -197,7 +201,8 @@ def run_screening(*, bg_min, bg_max, hull, nsites_max, max_results,
     수행해 material_id 기준으로 합친다(MP의 elements는 AND 의미).
     """
     # 후처리(클라이언트) 필터가 결과를 줄이면 더 큰 풀을 조회한다.
-    needs_pool = ald_only or nonmag_only or (bulk_min > 0) or (eps_min > 0)
+    needs_pool = (ald_only or nonmag_only or (bulk_min > 0) or (eps_min > 0)
+                  or bool(crystal_systems))
     pool = (int(max_results) if not needs_pool
             else min(_MAX_POOL, max(int(max_results), _POSTFILTER_POOL)))
     base = dict(
@@ -226,6 +231,8 @@ def run_screening(*, bg_min, bg_max, hull, nsites_max, max_results,
             df = df[df.bulk.fillna(0) >= bulk_min]
         if eps_min > 0:
             df = df[df.eps_total.fillna(0) >= eps_min]
+        if crystal_systems:
+            df = df[df.crystal_system.isin(crystal_systems)]
         if ald_only:
             df = df[df.is_ald]
         df = df.head(int(max_results))            # 최종 표시 개수 상한
