@@ -97,6 +97,34 @@ PRESETS = {
     "저항변화 메모리 (RRAM)":   dict(bg=(2.0, 6.0),  gap_type="전체", metal=True, hull=0.15, app="rram"),
 }
 
+# 데모 모드 AI 어시스턴트가 보여줄 사전 작성 시나리오(예시 질문 → 프리셋·답변). API 미사용.
+DEMO_CHAT = {
+    "ALD로 합성 가능한 high-k 게이트 유전체 후보": ("고유전율 게이트 (high-k)",
+        "### ALD 합성 가능 high-k 게이트 유전체 후보\n\n"
+        "Materials Project DFT 데이터에서 **넓은 밴드갭(4~9 eV)·금속 제외·안정** 조건으로 "
+        "스크리닝하고, **ALD 전구체가 확립된 단순 산화물**만 추렸습니다.\n\n"
+        "- 품질지수 **κ·Eg**(×SiO₂)와 5 nm 기준 **EOT**로 SRAM/DRAM 적합성 평가\n"
+        "- 각 후보는 Materials Project 원본 데이터에 링크(감사 가능)\n"
+        "- **ALD 합성 가능**한 것만 → 실제 양산성 고려\n\n"
+        "→ 결과를 대시보드에 반영했습니다. *고유전율 · ALD 공정 · 소자 시뮬레이션* 탭에서 확인하세요."),
+    "HfO₂·ZrO₂ 계열 강유전 메모리(FeRAM) 소재": ("강유전체 (FeRAM/FeFET)",
+        "### HfO₂·ZrO₂ 계열 강유전 메모리(FeRAM/FeFET) 후보\n\n"
+        "Hf 또는 Zr 함유 산화물을 추리고, 강유전성의 **결정학적 필요조건인 극성(polar) 점군** "
+        "여부로 후보를 한 단계 정교화했습니다(HfO₂ 강유전상은 orthorhombic Pca2₁).\n\n"
+        "- 화학식만이 아니라 **극성 공간군**으로 1차 선별\n"
+        "- 극성 점군은 필요조건(충분조건 아님) — 1차 우선 검토 대상\n\n"
+        "→ *강유전체* 탭에서 극성 후보를 확인하세요."),
+    "RRAM용 전이금속 산화물 (산소공공 스위칭)": ("저항변화 메모리 (RRAM)",
+        "### RRAM용 전이금속 산화물 후보\n\n"
+        "산소공공 필라멘트 스위칭에 적합한 **전이금속 산화물**을, 스위칭에 유리한 "
+        "**밴드갭 2~6 eV** 영역 중심으로 추렸습니다(HfO₂·TiO₂·Ta₂O₅ 계열).\n\n"
+        "→ *저항변화(RRAM)* 탭에서 확인하세요."),
+}
+
+# 데모 챗이 고른 시나리오의 프리셋을 셀렉트박스 생성 전에 적용한다(위젯 수정 예외 방지).
+if st.session_state.get("_pending_preset") in PRESETS:
+    st.session_state["preset"] = st.session_state.pop("_pending_preset")
+
 st.sidebar.markdown("### 응용 프리셋")
 preset = st.sidebar.selectbox("목적을 선택하면 조건이 자동 설정됩니다", list(PRESETS), key="preset")
 if st.session_state.get("_last_preset") != preset:
@@ -260,7 +288,8 @@ def kappa_eg_figure(dframe, title="κ–Eg 트레이드오프 지도", h=460):
 # 데모 모드에서 아직 결과가 없으면 첫 방문 시 기본 조건으로 자동 스크리닝한다
 # (방문자가 버튼을 누르지 않아도 바로 내용을 볼 수 있게).
 _auto_demo = demo_mode and st.session_state.get("df") is None
-if run or _auto_demo:
+_demo_run = st.session_state.pop("_demo_run", False)   # 데모 챗 '결과 보기' 트리거
+if run or _auto_demo or _demo_run:
     with st.spinner("Materials Project 조회 및 물성 시뮬레이션 중…"):
         try:
             df_new = datamod.run_screening(
@@ -285,8 +314,32 @@ if run or _auto_demo:
 # 모달 안 스크리닝으로 st.session_state.df가 갱신되고, 창을 닫으면(전체 rerun)
 # 아래 대시보드가 최신 결과로 다시 그려진다.
 if demo_mode:
-    st.caption("🧪 **데모 모드** — AI 어시스턴트는 꺼져 있습니다. "
-               "사이드바 조건으로 스크리닝하고 각 탭에서 결과를 살펴보세요.")
+    with st.expander("🤖 AI 어시스턴트 (데모) — 예시 질문으로 시연  ·  API 미사용",
+                     expanded=True):
+        sel = st.session_state.get("_canned_sel")
+        if sel and sel in DEMO_CHAT:
+            preset_name, answer = DEMO_CHAT[sel]
+            with st.chat_message("user"):
+                st.markdown(sel)
+            with st.chat_message("assistant"):
+                st.markdown(answer)
+            b1, b2 = st.columns([3, 1])
+            if b1.button(f"📊 이 조건으로 스크리닝 · 결과 보기  →  '{preset_name}'",
+                         type="primary", use_container_width=True, key="demo_apply"):
+                st.session_state["_pending_preset"] = preset_name
+                st.session_state["_demo_run"] = True
+                st.session_state["_canned_sel"] = None
+                st.rerun()
+            if b2.button("다른 질문", use_container_width=True, key="demo_back"):
+                st.session_state["_canned_sel"] = None
+                st.rerun()
+        else:
+            st.caption("자연어 질문을 클릭하면 **API 호출 없이** 즉시 응답하고, "
+                       "해당 조건으로 스크리닝해 결과를 대시보드에 반영합니다.")
+            for _q in DEMO_CHAT:
+                if st.button("💬 " + _q, use_container_width=True, key="dcq_" + _q[:14]):
+                    st.session_state["_canned_sel"] = _q
+                    st.rerun()
 elif st.button("AI 어시스턴트 열기", type="secondary",
                help="메모리 소재 발굴 대화형 어시스턴트입니다. 자연어 요청을 스크리닝 "
                     "조건으로 해석해 후보를 대시보드에 반영하고, 개념·물리 질문에는 "
